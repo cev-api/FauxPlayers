@@ -1,0 +1,34 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Build Paper and Fabric artifacts
+        run: bash gradlew build --no-daemon
+
+      - name: Upload server artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FauxPlayers
+          path: |
+            paper/build/libs/*-paper.jar
+            fabric/build/libs/*-fabric.jar
+
