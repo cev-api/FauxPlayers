@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+**/build/
+
+# Minecraft and test-server runtime data
+**/run/
+*.log
+*.log.gz
+
+# Java and Kotlin build output
+*.class
+out/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+

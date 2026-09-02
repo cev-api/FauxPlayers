@@ -1,0 +1,14 @@
+name: FauxPlayers
+version: 1.0.0
+main: com.example.fauxplayers.FauxPlayersPlugin
+api-version: '1.21'
+softdepend: [ProtocolLib, TAB]
+commands:
+  fauxplayers:
+    description: Manage presentation-only fake players
+    usage: /fauxplayers <status|list|reload|refresh|add|remove|say|ping|info|get|set|relay>
+    aliases: [fp, fakeplayers]
+    permission: fauxplayers.admin
+permissions:
+  fauxplayers.admin:
+    default: op

@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "com.example.fauxplayers.fabric.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "MinecraftServerMixin",
+    "ClientboundPlayerInfoUpdatePacketAccessorMixin",
+    "PlayerListMixin",
+    "ServerGamePacketListenerImplMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

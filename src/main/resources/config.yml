@@ -1,0 +1,69 @@
+enabled: true
+status:
+  enabled: true
+  include-real-players: true
+  include-static-fakes: true
+  include-relayed-players: true
+count:
+  mode: COMBINED
+  fixed: 20
+  additional: 0
+  minimum: 10
+  maximum: 30
+max-players:
+  mode: LOCAL
+  fixed: 100
+sample:
+  mode: COMBINED
+  shuffle: false
+  maximum-entries: -1
+tab:
+  enabled: true
+  include-static-fakes: true
+  include-relayed-players: true
+  default-latency: 50
+  random-ping:
+    enabled: true
+    minimum: 20
+    maximum: 100
+    standard-deviation: 25
+    refresh-seconds: 30
+  default-gamemode: SURVIVAL
+messages:
+  enabled: true
+  join: AUTO
+  leave: AUTO
+
+static-players:
+  - name: Herobrine
+    latency: 42
+  - name: Notch
+    latency: 71
+  - name: jeb_
+    latency: 35
+relay:
+  enabled: false
+  source: STATUS
+  status:
+    host: 127.0.0.1
+    port: -1
+    protocol-version: 776
+  query:
+    host: 127.0.0.1
+    port: -1
+    protocol-version: 776
+  http:
+    url: http://127.0.0.1:8080/players
+  refresh-seconds: 10
+  connect-timeout-ms: 3000
+  read-timeout-ms: 3000
+  keep-last-successful-result: true
+  maximum-stale-seconds: 300
+  use-for:
+    online-count: true
+    max-players: false
+    status-sample: true
+    tab-list: true
+    motd: false
+  names:
+    collision-behaviour: REMOVE_DUPLICATE_REMOTE

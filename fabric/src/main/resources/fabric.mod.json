@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "fauxplayers",
+  "version": "${version}",
+  "name": "FauxPlayers",
+  "description": "Presentation-only faux players for server status and the in-game player list.",
+  "authors": ["FauxPlayers"],
+  "environment": "server",
+  "entrypoints": {
+    "main": ["com.example.fauxplayers.fabric.FabricEntrypoint"]
+  },
+  "mixins": ["fauxplayers.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.2",
+    "fabric-api": ">=0.154.2"
+  }
+}
