@@ -66,7 +66,8 @@ public final class FauxPlayersCommand implements TabExecutor {
         sender.sendMessage("§eReal online: §f" + plugin.getServer().getOnlinePlayers().size());
         sender.sendMessage("§eStatic fakes: §f" + plugin.config().statics.size()
                 + " §8| §7names: §f" + names(plugin.config().statics));
-        sender.sendMessage("§eRemote known: §f" + snapshot.players().size()
+        sender.sendMessage("§eRelay endpoint: §f" + relayEndpoint());
+        sender.sendMessage("§eRelayed players: §f" + snapshot.players().size()
                 + " §8| §7names: §f" + names(snapshot.players()));
         sender.sendMessage("§eRemote reported: §f" + snapshot.reportedOnline()
                 + " §8| §7max: §f" + snapshot.reportedMax());
@@ -75,6 +76,14 @@ public final class FauxPlayersCommand implements TabExecutor {
                 + " §8| §7cache age: §f" + age);
         sender.sendMessage("§eLast error: §f"
                 + (plugin.relay().lastError() == null ? "none" : plugin.relay().lastError()));
+    }
+
+    private String relayEndpoint() {
+        if ("HTTP".equals(plugin.config().relaySource)) {
+            return plugin.config().httpUrl.isBlank() ? "(not configured)" : plugin.config().httpUrl;
+        }
+        return plugin.config().relayHost
+                + (plugin.config().relayPort > 0 ? ":" + plugin.config().relayPort : " (SRV/default port)");
     }
 
     private void list(CommandSender sender) {

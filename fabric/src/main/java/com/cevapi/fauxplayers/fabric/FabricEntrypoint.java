@@ -61,6 +61,8 @@ public final class FabricEntrypoint implements ModInitializer {
     private FabricTabManager tab;
     private FabricTabPlaceholderIntegration tabPlaceholders;
     private FabricMessageFormat messageFormat;
+    private PlayerSnapshot announcedRemote = PlayerSnapshot.empty();
+    private Instant announcedRemoteRefresh;
     private long tick;
 
     public FabricEntrypoint() {
@@ -99,13 +101,27 @@ public final class FabricEntrypoint implements ModInitializer {
         if (tab != null) tab.clear();
         tabPlaceholders = null;
         messageFormat = null;
+        announcedRemote = PlayerSnapshot.empty();
+        announcedRemoteRefresh = null;
         server = null;
     }
 
     private void tick(MinecraftServer minecraftServer) {
         if (minecraftServer != server || config == null || tab == null) return;
-        if (++tick % 5 == 0) tab.sync(config, tabEntries());
+        if (++tick % 5 == 0) {
+            tab.sync(config, tabEntries());
+            announceRemoteChanges();
+        }
         if (tabPlaceholders != null) tabPlaceholders.tick();
+    }
+
+    private void announceRemoteChanges() {
+        PlayerSnapshot current = relay == null ? PlayerSnapshot.empty() : relay.snapshot();
+        if (current.refreshedAt() == null || current.refreshedAt().equals(announcedRemoteRefresh)) return;
+        PlayerSnapshot previous = announcedRemote;
+        announcedRemote = current;
+        announcedRemoteRefresh = current.refreshedAt();
+        if (previous.refreshedAt() != null) remoteChanged(previous, current);
     }
 
     private void reload() {
@@ -123,9 +139,8 @@ public final class FabricEntrypoint implements ModInitializer {
                 relay = new RelayManager(new RelayManager.Host() {
                     @Override public void fine(String message) { log(message); }
                     @Override public void warning(String message) { warn(message); }
-                    @Override public void remoteChanged(PlayerSnapshot previous, PlayerSnapshot next) {
-                        if (server != null) server.execute(() -> remoteChanged(previous, next));
-                    }
+                    // Relay worker threads must not enqueue chat broadcasts during login.
+                    @Override public void remoteChanged(PlayerSnapshot previous, PlayerSnapshot next) { }
                 });
             }
             if (tab == null) tab = new FabricTabManager(server);
@@ -333,10 +348,16 @@ public final class FabricEntrypoint implements ModInitializer {
         String age = snapshot.refreshedAt() == null ? "never" : Duration.between(snapshot.refreshedAt(), Instant.now()).toSeconds() + "s";
         message(source, "§eReal online: §f" + server.getPlayerList().getPlayerCount());
         message(source, "§eStatic fakes: §f" + config.statics.size() + " §8| §7names: §f" + namesText(config.statics));
-        message(source, "§eRemote known: §f" + snapshot.players().size() + " §8| §7names: §f" + namesText(snapshot.players()));
+        message(source, "§eRelay endpoint: §f" + relayEndpoint());
+        message(source, "§eRelayed players: §f" + snapshot.players().size() + " §8| §7names: §f" + namesText(snapshot.players()));
         message(source, "§eRemote reported: §f" + snapshot.reportedOnline() + " §8| §7max: §f" + snapshot.reportedMax());
         message(source, "§eSource: §f" + config.relaySource + " §8| §7enabled: §f" + config.relayEnabled + " §8| §7cache age: §f" + age);
         return message(source, "§eLast error: §f" + (relay.lastError() == null ? "none" : relay.lastError()));
+    }
+
+    private String relayEndpoint() {
+        if ("HTTP".equals(config.relaySource)) return config.httpUrl.isBlank() ? "(not configured)" : config.httpUrl;
+        return config.relayHost + (config.relayPort > 0 ? ":" + config.relayPort : " (SRV/default port)");
     }
 
     private int list(CommandSourceStack source) {
