@@ -1,7 +1,7 @@
 plugins { base }
 
 group = "com.cevapi.fauxplayers"
-version = "1.0.0"
+version = "1.0.1"
 
 tasks.register("buildAllPlatforms") {
     group = "build"
