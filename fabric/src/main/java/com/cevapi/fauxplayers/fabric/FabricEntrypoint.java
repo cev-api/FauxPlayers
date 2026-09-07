@@ -8,8 +8,11 @@ import com.cevapi.fauxplayers.core.PresentationMath;
 import com.cevapi.fauxplayers.core.RelayManager;
 import com.cevapi.fauxplayers.core.YamlConfig;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.ArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
@@ -43,8 +46,7 @@ import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.protocol.status.ServerStatus;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.permissions.LevelBasedPermissionSet;
-import net.minecraft.server.permissions.PermissionLevel;
+import net.minecraft.server.permissions.Permissions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -81,6 +83,12 @@ public final class FabricEntrypoint implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(this::tick);
         ServerPlayConnectionEvents.JOIN.register((handler, sender, minecraftServer) -> {
             if (minecraftServer == server) sendTo(handler.getPlayer());
+            ServerPlayer joinedPlayer = handler.getPlayer();
+            log("Player " + joinedPlayer.getGameProfile().name()
+                    + " joined; FauxPlayers command visibility: "
+                    + (admin(joinedPlayer.createCommandSourceStack())
+                            ? "visible (operator, level 2+)"
+                            : "hidden (non-operator)"));
         });
         CommandRegistrationCallback.EVENT.register(this::registerCommands);
     }
@@ -93,6 +101,7 @@ public final class FabricEntrypoint implements ModInitializer {
         tabPlaceholders = new FabricTabPlaceholderIntegration(this);
         tabPlaceholders.enable();
         log("FauxPlayers Fabric enabled; presentation-only entries are never server players.");
+        log("Command tree hardened: /fauxplayers, /fp and /fakeplayers are hidden from non-operators.");
     }
 
     private void stop(MinecraftServer minecraftServer) {
@@ -231,105 +240,134 @@ public final class FabricEntrypoint implements ModInitializer {
                                   CommandBuildContext buildContext,
                                   Commands.CommandSelection selection) {
         var rootBuilder = Commands.literal("fauxplayers")
-                .requires(this::admin)
+                .requires(FabricEntrypoint::admin)
                 .executes(context -> help(context.getSource()));
-        rootBuilder.then(Commands.literal("status").executes(context -> status(context.getSource())));
-        rootBuilder.then(Commands.literal("info").executes(context -> status(context.getSource())));
-        rootBuilder.then(Commands.literal("list").executes(context -> list(context.getSource())));
-        rootBuilder.then(Commands.literal("reload").executes(context -> {
+        rootBuilder.then(ctl("status").executes(context -> status(context.getSource())));
+        rootBuilder.then(ctl("info").executes(context -> status(context.getSource())));
+        rootBuilder.then(ctl("list").executes(context -> list(context.getSource())));
+        rootBuilder.then(ctl("reload").executes(context -> {
             reload();
             return message(context, "§aConfiguration reloaded.");
         }));
-        rootBuilder.then(Commands.literal("refresh").executes(context -> {
+        rootBuilder.then(ctl("refresh").executes(context -> {
             relay.refreshAsync(config);
             return message(context, "§aRelay refresh scheduled.");
         }));
-        rootBuilder.then(Commands.literal("add")
-                .then(Commands.argument("name", StringArgumentType.word())
+        rootBuilder.then(ctl("add")
+                .then(arg("name", StringArgumentType.word())
                         .suggests(this::suggestFakeNames)
                         .executes(context -> add(context, StringArgumentType.getString(context, "name")))));
-        rootBuilder.then(Commands.literal("remove")
-                .then(Commands.argument("name", StringArgumentType.word())
+        rootBuilder.then(ctl("remove")
+                .then(arg("name", StringArgumentType.word())
                         .suggests(this::suggestFakeNames)
                         .executes(context -> remove(context, StringArgumentType.getString(context, "name")))));
-        rootBuilder.then(Commands.literal("say")
-                .then(Commands.argument("name", StringArgumentType.word())
+        rootBuilder.then(ctl("say")
+                .then(arg("name", StringArgumentType.word())
                         .suggests(this::suggestFakeNames)
-                        .then(Commands.argument("message", StringArgumentType.greedyString())
+                        .then(arg("message", StringArgumentType.greedyString())
                                 .executes(context -> say(context,
                                         StringArgumentType.getString(context, "name"),
                                         StringArgumentType.getString(context, "message"))))));
-        rootBuilder.then(Commands.literal("chat")
-                .then(Commands.argument("name", StringArgumentType.word())
+        rootBuilder.then(ctl("chat")
+                .then(arg("name", StringArgumentType.word())
                         .suggests(this::suggestFakeNames)
-                        .then(Commands.argument("message", StringArgumentType.greedyString())
+                        .then(arg("message", StringArgumentType.greedyString())
                                 .executes(context -> say(context,
                                         StringArgumentType.getString(context, "name"),
                                         StringArgumentType.getString(context, "message"))))));
-        rootBuilder.then(Commands.literal("ping")
-                .then(Commands.argument("name", StringArgumentType.word())
+        rootBuilder.then(ctl("ping")
+                .then(arg("name", StringArgumentType.word())
                         .suggests(this::suggestFakeNames)
-                        .then(Commands.argument("milliseconds", IntegerArgumentType.integer(0))
+                        .then(arg("milliseconds", IntegerArgumentType.integer(0))
                                 .executes(context -> ping(context,
                                         StringArgumentType.getString(context, "name"),
                                         IntegerArgumentType.getInteger(context, "milliseconds"))))));
-        rootBuilder.then(Commands.literal("get")
-                .then(Commands.argument("setting", StringArgumentType.word())
+        rootBuilder.then(ctl("get")
+                .then(arg("setting", StringArgumentType.word())
                         .suggests(this::suggestSettings)
                         .executes(context -> get(context, StringArgumentType.getString(context, "setting")))));
-        rootBuilder.then(Commands.literal("set")
-                .then(Commands.argument("setting", StringArgumentType.word())
+        rootBuilder.then(ctl("set")
+                .then(arg("setting", StringArgumentType.word())
                         .suggests(this::suggestSettings)
-                        .then(Commands.argument("value", StringArgumentType.greedyString())
+                        .then(arg("value", StringArgumentType.greedyString())
                                 .suggests(this::suggestSettingValues)
                                 .executes(context -> set(context,
                                         StringArgumentType.getString(context, "setting"),
                                         StringArgumentType.getString(context, "value"))))));
 
-        var relayBuilder = Commands.literal("relay")
+        var relayBuilder = ctl("relay")
                 .executes(context -> relay(context.getSource()));
-        relayBuilder.then(Commands.literal("enable")
+        relayBuilder.then(ctl("enable")
                 .executes(context -> setValue(context, "relay.enabled", true)));
-        relayBuilder.then(Commands.literal("enabled")
+        relayBuilder.then(ctl("enabled")
                 .executes(context -> setValue(context, "relay.enabled", true)));
-        relayBuilder.then(Commands.literal("disable")
+        relayBuilder.then(ctl("disable")
                 .executes(context -> setValue(context, "relay.enabled", false)));
-        relayBuilder.then(Commands.literal("refresh").executes(context -> {
+        relayBuilder.then(ctl("refresh").executes(context -> {
             relay.refreshAsync(config);
             return message(context, "§aRelay refresh scheduled.");
         }));
-        relayBuilder.then(Commands.literal("host")
+        relayBuilder.then(ctl("host")
                 .executes(context -> message(context, "§eUsage: §f/fauxplayers relay host <hostname>"))
-                .then(Commands.argument("host", StringArgumentType.word())
+                .then(arg("host", StringArgumentType.word())
                         .executes(context -> setRelayValue(context, "relay.status.host",
                                 StringArgumentType.getString(context, "host")))));
-        relayBuilder.then(Commands.literal("port")
-                .then(Commands.argument("port", IntegerArgumentType.integer(-1))
+        relayBuilder.then(ctl("port")
+                .then(arg("port", IntegerArgumentType.integer(-1))
                         .executes(context -> setRelayValue(context, "relay.status.port",
                                 IntegerArgumentType.getInteger(context, "port")))));
-        relayBuilder.then(Commands.literal("source")
-                .then(Commands.argument("source", StringArgumentType.word())
+        relayBuilder.then(ctl("source")
+                .then(arg("source", StringArgumentType.word())
                         .suggests((context, builder) -> suggest(builder, List.of("STATUS", "HTTP")))
                         .executes(context -> setRelayValue(context, "relay.source",
                                 StringArgumentType.getString(context, "source")))));
-        relayBuilder.then(Commands.literal("refresh-seconds")
-                .then(Commands.argument("seconds", IntegerArgumentType.integer(1))
+        relayBuilder.then(ctl("refresh-seconds")
+                .then(arg("seconds", IntegerArgumentType.integer(1))
                         .executes(context -> setRelayValue(context, "relay.refresh-seconds",
                                 IntegerArgumentType.getInteger(context, "seconds")))));
-        relayBuilder.then(Commands.argument("hostname", StringArgumentType.word())
+        relayBuilder.then(arg("hostname", StringArgumentType.word())
                 .executes(context -> setRelayHostShortcut(context,
                         StringArgumentType.getString(context, "hostname"))));
         rootBuilder.then(relayBuilder);
 
+        // The server-operator requirement is applied to every node in the tree, not
+        // just the roots. Brigadier parses input syntactically without checking
+        // requirements, so suggestion requests such as "/fauxplayers " or
+        // "/fauxplayers add " must not be able to enumerate subcommands or argument
+        // suggestions through child nodes that still default to canUse() == true.
+
         LiteralCommandNode<CommandSourceStack> root = dispatcher.register(rootBuilder);
-        dispatcher.register(Commands.literal("fp").requires(this::admin).redirect(root));
-        dispatcher.register(Commands.literal("fakeplayers").requires(this::admin).redirect(root));
+        dispatcher.register(Commands.literal("fp").requires(FabricEntrypoint::admin).redirect(root));
+        dispatcher.register(Commands.literal("fakeplayers").requires(FabricEntrypoint::admin).redirect(root));
     }
 
-    private boolean admin(CommandSourceStack source) {
-        return source.permissions() == net.minecraft.server.permissions.PermissionSet.ALL_PERMISSIONS
-                || source.permissions() instanceof LevelBasedPermissionSet level
-                && level.level().isEqualOrHigherThan(PermissionLevel.GAMEMASTERS);
+    /** A literal sub-command node gated by the server-operator requirement. */
+    private static LiteralArgumentBuilder<CommandSourceStack> ctl(String name) {
+        return Commands.literal(name).requires(FabricEntrypoint::admin);
+    }
+
+    /** An argument node gated by the server-operator requirement. */
+    private static <A> RequiredArgumentBuilder<CommandSourceStack, A> arg(
+            String name, ArgumentType<A> type) {
+        return Commands.<A>argument(name, type)
+                .requires(FabricEntrypoint::admin);
+    }
+
+    public static boolean admin(CommandSourceStack source) {
+        // Non-player sources (console, RCON, command blocks, functions) are trusted.
+        // Players must both appear in the operator list and hold at least the
+        // "commands admin" permission level (2). This mirrors the operator check
+        // used by AntiFly: an account merely listed in ops.json at a lower level,
+        // or a player granted a level by a permissions mod, is still denied.
+        if (source.getEntity() == null) return true;
+        if (source.getEntity() instanceof ServerPlayer player) {
+            MinecraftServer minecraftServer = source.getServer();
+            return minecraftServer != null
+                    && minecraftServer.getPlayerList().isOp(
+                            new net.minecraft.server.players.NameAndId(player.getGameProfile()))
+                    && source.permissions().hasPermission(Permissions.COMMANDS_ADMIN);
+        }
+        return false;
     }
 
     private int help(CommandSourceStack source) {

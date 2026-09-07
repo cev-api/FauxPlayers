@@ -16,6 +16,7 @@ import java.util.Set;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
+import org.bukkit.entity.Player;
 
 public final class FauxPlayersCommand implements TabExecutor {
     private final FauxPlayersPlugin plugin;
@@ -26,7 +27,7 @@ public final class FauxPlayersCommand implements TabExecutor {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!sender.hasPermission("fauxplayers.admin")) {
+        if (sender instanceof Player player && !player.isOp()) {
             sender.sendMessage("§cNo permission.");
             return true;
         }
@@ -355,7 +356,7 @@ public final class FauxPlayersCommand implements TabExecutor {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!sender.hasPermission("fauxplayers.admin")) return List.of();
+        if (sender instanceof Player player && !player.isOp()) return List.of();
         if (args.length == 0 || args.length == 1) {
             return partial(args.length == 0 ? "" : args[0], CommandCatalog.ROOT);
         }

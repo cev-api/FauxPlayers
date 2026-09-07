@@ -6,7 +6,9 @@
     "MinecraftServerMixin",
     "ClientboundPlayerInfoUpdatePacketAccessorMixin",
     "PlayerListMixin",
-    "ServerGamePacketListenerImplMixin"
+    "ServerGamePacketListenerImplMixin",
+    "CommandDispatcherSuggestionMixin",
+    "CommandSuggestionMixin"
   ],
   "injectors": {
     "defaultRequire": 1
