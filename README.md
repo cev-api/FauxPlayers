@@ -258,6 +258,21 @@ Both platforms provide command completion.
 Paper requires `fauxplayers.admin`.
 Fabric requires the server-operator permission level.
 
+### Non-operators cannot discover FauxPlayers
+
+For a non-operator, the FauxPlayers commands do not exist:
+
+- The roots and aliases are absent from the command-tree packet.
+- Autocomplete replies never contain them, even when the client sends raw
+  suggestion requests such as `/f`, `/fa`, or `/fp`. Paper strips them from the
+  suggestion packet with ProtocolLib; Fabric filters them at the command
+  dispatcher before any reply is built.
+- Executing them reports an unknown command, and completion returns nothing.
+- Operators are unaffected.
+
+On Paper, the suggestion-packet filter requires ProtocolLib.
+The command-tree removal and the execution guard work without it.
+
 ## Troubleshooting
 
 ### Fake names do not appear

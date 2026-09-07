@@ -20,6 +20,7 @@ dependencies {
     implementation(project(":common"))
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     compileOnly("com.comphenix.protocol:ProtocolLib:5.3.0")
+    compileOnly("com.mojang:brigadier:1.3.10")
 }
 
 java {
