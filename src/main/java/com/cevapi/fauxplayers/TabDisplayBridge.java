@@ -176,7 +176,7 @@ public final class TabDisplayBridge {
             Player source=Bukkit.getOnlinePlayers().stream().findFirst().orElse(null);
             if(source==null)return null;
             ClassLoader loader=tabPlugin.getClass().getClassLoader();
-            Class<?> apiClass=Class.forName("me.neznamy.tab.api.TABAPI",true,loader);
+            Class<?> apiClass=Class.forName("me.neznamy.tab.api.TabAPI",true,loader);
             Object api=apiClass.getMethod("getInstance").invoke(null);
             Object tabPlayer=invoke(api,"getPlayer",source.getUniqueId());
             if(tabPlayer==null)tabPlayer=invoke(api,"getPlayer",source.getName());
