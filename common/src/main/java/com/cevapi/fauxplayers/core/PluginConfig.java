@@ -31,6 +31,16 @@ public final class PluginConfig {
             return value == null ? fallback : String.valueOf(value);
         }
 
+        default double decimal(String path, double fallback) {
+            Object value = get(path);
+            if (value instanceof Number n) return n.doubleValue();
+            if (value != null) {
+                try { return Double.parseDouble(String.valueOf(value)); }
+                catch (NumberFormatException ignored) { }
+            }
+            return fallback;
+        }
+
         @SuppressWarnings("unchecked")
         default List<Map<String, Object>> maps(String path) {
             Object value = get(path);
@@ -47,7 +57,9 @@ public final class PluginConfig {
     }
 
     public final boolean enabled, relayEnabled, messageEnabled, statusEnabled,
-            includeReal, statusFakes, statusRemote, tabEnabled, tabFakes, tabRemote;
+            includeReal, statusFakes, statusRemote, tabEnabled, tabFakes, tabRemote,
+            replayEnabled, replayLoop, replayChat, replayDeaths, replayEvents, tabReplay, statusReplay,
+            replayDiscordChat, replayAnnounceSeeks, replaySkipRealPlayers;
     public final String countMode, sampleMode, collision, relaySource, defaultMode;
     public final int fixed, additional, minimum, maximum, fixedMax, defaultLatency,
             pingMinimum, pingMaximum, pingStandardDeviation, pingRefreshSeconds,
@@ -57,6 +69,11 @@ public final class PluginConfig {
     public final List<FauxPlayerEntry> statics;
     public final String relayHost, httpUrl;
     public final int relayPort;
+    public final String replayFile;
+    public final double replaySpeed;
+    public final int replayMaximumGapSeconds, replayMaximumPlayers;
+    /** Literal text rewrites applied to a line before it is replayed: {from, to} pairs. */
+    public final List<String[]> replayReplacements;
 
     private PluginConfig(Source source) {
         enabled = source.bool("enabled", true);
@@ -69,6 +86,29 @@ public final class PluginConfig {
         tabEnabled = source.bool("tab.enabled", true);
         tabFakes = source.bool("tab.include-static-fakes", true);
         tabRemote = source.bool("tab.include-relayed-players", true);
+        tabReplay = source.bool("tab.include-replay", true);
+        statusReplay = source.bool("status.include-replay", true);
+
+        replayEnabled = source.bool("replay.enabled", false);
+        replayFile = source.text("replay.file", "replay/chat.csv");
+        replaySpeed = Math.max(0.01, source.decimal("replay.speed", 1.0));
+        replayLoop = source.bool("replay.loop", true);
+        replayMaximumGapSeconds = Math.max(0, source.integer("replay.maximum-gap-seconds", 30));
+        replayMaximumPlayers = Math.max(0, source.integer("replay.maximum-players", 100));
+        replayChat = source.bool("replay.chat", true);
+        replayDiscordChat = source.bool("replay.discord-chat", true);
+        replayDeaths = source.bool("replay.deaths", true);
+        replayEvents = source.bool("replay.events", true);
+        replayAnnounceSeeks = source.bool("replay.announce-seeks", true);
+        replaySkipRealPlayers = source.bool("replay.skip-real-players", true);
+        List<String[]> rewrites = new ArrayList<>();
+        for (Map<String, Object> map : source.maps("replay.replacements")) {
+            Object from = map.get("from");
+            if (from == null || String.valueOf(from).isEmpty()) continue;
+            Object to = map.get("to");
+            rewrites.add(new String[]{String.valueOf(from), to == null ? "" : String.valueOf(to)});
+        }
+        replayReplacements = List.copyOf(rewrites);
 
         countMode = upper(source.text("count.mode", "COMBINED"));
         sampleMode = upper(source.text("sample.mode", "COMBINED"));

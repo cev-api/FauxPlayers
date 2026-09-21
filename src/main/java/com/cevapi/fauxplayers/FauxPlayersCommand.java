@@ -54,29 +54,39 @@ public final class FauxPlayersCommand implements TabExecutor {
             case "get" -> get(sender, args);
             case "set" -> set(sender, args);
             case "relay" -> relay(sender, args);
+            case "replay" -> replay(sender, args);
             default -> help(sender);
         }
         return true;
     }
 
     private void status(CommandSender sender) {
-        var snapshot = plugin.relay().snapshot();
-        String age = snapshot.refreshedAt() == null
+        var cached = plugin.relay().snapshot();
+        var active = plugin.remoteEntries();
+        String age = cached.refreshedAt() == null
                 ? "never"
-                : Duration.between(snapshot.refreshedAt(), Instant.now()).toSeconds() + "s";
+                : Duration.between(cached.refreshedAt(), Instant.now()).toSeconds() + "s";
         sender.sendMessage("§eReal online: §f" + plugin.getServer().getOnlinePlayers().size());
         sender.sendMessage("§eStatic fakes: §f" + plugin.config().statics.size()
                 + " §8| §7names: §f" + names(plugin.config().statics));
         sender.sendMessage("§eRelay endpoint: §f" + relayEndpoint());
-        sender.sendMessage("§eRelayed players: §f" + snapshot.players().size()
-                + " §8| §7names: §f" + names(snapshot.players()));
-        sender.sendMessage("§eRemote reported: §f" + snapshot.reportedOnline()
-                + " §8| §7max: §f" + snapshot.reportedMax());
+        sender.sendMessage("§eRelayed players: §f" + active.size() + " shown"
+                + " §8| §7cached: §f" + cached.players().size()
+                + " §8| §7names: §f" + names(active));
+        sender.sendMessage("§eRemote reported: §f" + cached.reportedOnline()
+                + " §8| §7max: §f" + cached.reportedMax());
         sender.sendMessage("§eSource: §f" + plugin.config().relaySource
                 + " §8| §7enabled: §f" + plugin.config().relayEnabled
                 + " §8| §7cache age: §f" + age);
+        sender.sendMessage("§eReplay: §f" + plugin.config().replayEnabled
+                + " §8| §7lines: §f" + plugin.replay().position() + "§7/§f" + plugin.replay().eventCount()
+                + " §8| §7players: §f" + plugin.replay().playerCount());
         sender.sendMessage("§eLast error: §f"
                 + (plugin.relay().lastError() == null ? "none" : plugin.relay().lastError()));
+        if (!plugin.config().relayEnabled && !cached.players().isEmpty()) {
+            sender.sendMessage("§7The relay is off, so its " + cached.players().size()
+                    + " cached names are not shown. §f/fauxplayers relay enable §7uses them again.");
+        }
     }
 
     private String relayEndpoint() {
@@ -90,6 +100,7 @@ public final class FauxPlayersCommand implements TabExecutor {
     private void list(CommandSender sender) {
         sender.sendMessage("§eStatic fake names: §f" + names(plugin.config().statics));
         sender.sendMessage("§eCached remote names: §f" + names(plugin.remoteEntries()));
+        sender.sendMessage("§eReplayed names: §f" + names(plugin.replayEntries()));
     }
 
     private String names(Collection<FauxPlayerEntry> entries) {
@@ -248,11 +259,211 @@ public final class FauxPlayersCommand implements TabExecutor {
                 if (!raw.equalsIgnoreCase("true") && !raw.equalsIgnoreCase("false")) return null;
                 return Boolean.parseBoolean(raw);
             }
+            if (old instanceof Double || old instanceof Float) return Double.parseDouble(raw);
             if (old instanceof Number) return Integer.parseInt(raw);
             return raw;
         } catch (NumberFormatException error) {
             return null;
         }
+    }
+
+    private void replay(CommandSender sender, String[] args) {
+        var replay = plugin.replay();
+        if (args.length == 1 || args[1].equalsIgnoreCase("status")) {
+            sender.sendMessage("§bReplay §8» §7enabled=§f" + plugin.config().replayEnabled
+                    + " §8| §7file=§f" + plugin.config().replayFile
+                    + " §8| §7speed=§f" + plugin.config().replaySpeed
+                    + " §8| §7loop=§f" + plugin.config().replayLoop);
+            sender.sendMessage("§7Lines: §f" + replay.position() + "§7/§f" + replay.eventCount()
+                    + " §8| §7players: §f" + replay.playerCount()
+                    + " §8| §7finished: §f" + replay.finished());
+            sender.sendMessage("§7Clock: §f" + span(replay.clockMillis()) + "§7 of §f" + span(replay.timelineMillis())
+                    + " §8| §7next line in §f" + (replay.nextDueInMillis() < 0 ? "(none)" : seconds(replay.nextDueInMillis()))
+                    + " §8| §7ticks driven: §f" + replay.ticks());
+            sender.sendMessage("§7Loaded: §f" + (replay.loadedFile() == null ? "(none)" : replay.loadedFile()));
+            sender.sendMessage("§7Server messages posted by: §f" + (replay.bridgeAuthors().isEmpty()
+                    ? "(no account detected; only joins and leaves are recognised)"
+                    : String.join("§8, §f", replay.bridgeAuthors())));
+            sender.sendMessage("§7In-game chat relayed by: §f" + (replay.relayAuthors().isEmpty()
+                    ? "(no relay account detected)"
+                    : replay.relayAuthors().size() + " account(s)"));
+            if (replay.lastError() != null) sender.sendMessage("§cLast error: §f" + replay.lastError());
+            sender.sendMessage("§7Use §f/fauxplayers replay <" + CommandCatalog.replayUsage() + "> ...");
+            return;
+        }
+        String option = args[1].toLowerCase(Locale.ROOT);
+        switch (option) {
+            case "enable", "enabled" -> updateReplay(sender, "replay.enabled", true);
+            case "disable" -> updateReplay(sender, "replay.enabled", false);
+            case "restart" -> {
+                replay.restart();
+                sender.sendMessage("§aReplay restarted from the first line.");
+            }
+            case "file" -> {
+                if (args.length < 3) sender.sendMessage("§eUsage: §f/fauxplayers replay file <path>");
+                else updateReplay(sender, "replay.file", String.join(" ", Arrays.copyOfRange(args, 2, args.length)));
+            }
+            case "speed" -> {
+                Double speed = args.length < 3 ? null : decimal(args[2]);
+                if (speed == null || speed < 0.01) {
+                    sender.sendMessage("§eUsage: §f/fauxplayers replay speed <multiplier>");
+                } else {
+                    updateReplay(sender, "replay.speed", speed);
+                }
+            }
+            case "loop", "chat", "discord-chat", "deaths", "events" -> {
+                Boolean value = args.length < 3 ? null : flag(args[2]);
+                if (value == null) sender.sendMessage("§eUsage: §f/fauxplayers replay " + option + " <true|false>");
+                else updateReplay(sender, "replay." + option, value);
+            }
+            case "seek" -> {
+                Integer line = args.length < 3 ? null : integer(args[2]);
+                if (line == null || line < 0) {
+                    sender.sendMessage("§eUsage: §f/fauxplayers replay seek <line>");
+                } else if (replay.seek(line)) {
+                    sender.sendMessage("§aNow at line §f" + replay.position() + "§a/§f" + replay.eventCount()
+                            + "§a, players: §f" + replay.playerCount());
+                } else {
+                    sender.sendMessage("§cNo replay timeline is loaded yet.");
+                }
+            }
+            case "skip" -> {
+                Integer lines = args.length < 3 ? null : integer(args[2]);
+                if (lines == null) {
+                    sender.sendMessage("§eUsage: §f/fauxplayers replay skip <lines>§e (negative to go back)");
+                } else if (replay.skip(lines)) {
+                    sender.sendMessage("§aNow at line §f" + replay.position() + "§a/§f" + replay.eventCount()
+                            + "§a, players: §f" + replay.playerCount());
+                } else {
+                    sender.sendMessage("§cNo replay timeline is loaded yet.");
+                }
+            }
+            case "replace" -> {
+                String pair = args.length < 3 ? null : String.join(" ", Arrays.copyOfRange(args, 2, args.length));
+                int split = pair == null ? -1 : pair.indexOf('=');
+                if (split <= 0) {
+                    sender.sendMessage("§eUsage: §f/fauxplayers replay replace <from>=<to>");
+                    sender.sendMessage("§7The first §f=§7 splits it, so spaces work on both sides.");
+                } else {
+                    addReplacement(sender, pair.substring(0, split).strip(), pair.substring(split + 1).strip());
+                }
+            }
+            case "unreplace" -> {
+                String from = args.length < 3 ? null : String.join(" ", Arrays.copyOfRange(args, 2, args.length)).strip();
+                if (from == null || from.isEmpty()) {
+                    sender.sendMessage("§eUsage: §f/fauxplayers replay unreplace <from>");
+                } else {
+                    removeReplacement(sender, from);
+                }
+            }
+            case "replacements" -> listReplacements(sender);
+            case "maximum-gap-seconds", "maximum-players" -> {
+                Integer value = args.length < 3 ? null : integer(args[2]);
+                if (value == null || value < 0) {
+                    sender.sendMessage("§eUsage: §f/fauxplayers replay " + option + " <number>");
+                } else {
+                    updateReplay(sender, "replay." + option, value);
+                }
+            }
+            default -> replay(sender, new String[]{args[0]});
+        }
+    }
+
+    private void listReplacements(CommandSender sender) {
+        var rules = plugin.config().replayReplacements;
+        if (rules.isEmpty()) {
+            sender.sendMessage("§bReplay replacements §8» §7none");
+            return;
+        }
+        sender.sendMessage("§bReplay replacements §8» §f" + rules.size());
+        for (int index = 0; index < rules.size(); index++) {
+            sender.sendMessage("§7" + index + ". §f" + rules.get(index)[0] + " §8-> §f"
+                    + (rules.get(index)[1].isEmpty() ? "(removed)" : rules.get(index)[1]));
+        }
+    }
+
+    private void addReplacement(CommandSender sender, String from, String to) {
+        var list = new ArrayList<java.util.Map<String, Object>>();
+        for (String[] rule : plugin.config().replayReplacements) {
+            if (rule[0].equals(from)) {
+                sender.sendMessage("§eReplacing the existing rule for §f" + from + "§e.");
+                continue;
+            }
+            list.add(replacement(rule[0], rule[1]));
+        }
+        list.add(replacement(from, to));
+        applyReplacements(sender, list, "§aAdded replacement: §f" + from + " §a-> §f"
+                + (to.isEmpty() ? "(removed)" : to));
+    }
+
+    private void removeReplacement(CommandSender sender, String from) {
+        var list = new ArrayList<java.util.Map<String, Object>>();
+        boolean removed = false;
+        for (String[] rule : plugin.config().replayReplacements) {
+            if (rule[0].equals(from)) {
+                removed = true;
+                continue;
+            }
+            list.add(replacement(rule[0], rule[1]));
+        }
+        if (!removed) {
+            sender.sendMessage("§cNo replacement starts with §f" + from + "§c.");
+            return;
+        }
+        applyReplacements(sender, list, "§aRemoved the replacement for §f" + from);
+    }
+
+    private java.util.Map<String, Object> replacement(String from, String to) {
+        var rule = new LinkedHashMap<String, Object>();
+        rule.put("from", from);
+        rule.put("to", to);
+        return rule;
+    }
+
+    private void applyReplacements(CommandSender sender, List<java.util.Map<String, Object>> list, String message) {
+        plugin.getConfig().set("replay.replacements", list);
+        plugin.saveConfig();
+        plugin.reloadPlugin();
+        sender.sendMessage(message);
+        sender.sendMessage("§7Run §f/fauxplayers replay restart §7to reapply it to the loaded lines.");
+    }
+
+    private Double decimal(String value) {
+        try {
+            return Double.valueOf(value);
+        } catch (NumberFormatException error) {
+            return null;
+        }
+    }
+
+    /** Formats a duration as a compact d/h/m figure for the replay clock. */
+    private String span(long millis) {
+        long seconds = Math.max(0, millis) / 1000;
+        long days = seconds / 86_400;
+        long hours = seconds % 86_400 / 3_600;
+        long minutes = seconds % 3_600 / 60;
+        if (days > 0) return days + "d " + hours + "h " + minutes + "m";
+        if (hours > 0) return hours + "h " + minutes + "m";
+        if (minutes > 0) return minutes + "m " + seconds % 60 + "s";
+        return seconds + "s";
+    }
+
+    private String seconds(long millis) {
+        long value = Math.max(0, millis) / 1000;
+        return value < 60 ? value + "s" : span(millis);
+    }
+
+    private Boolean flag(String value) {
+        if (value.equalsIgnoreCase("true")) return Boolean.TRUE;
+        if (value.equalsIgnoreCase("false")) return Boolean.FALSE;
+        return null;
+    }
+
+    private void updateReplay(CommandSender sender, String key, Object value) {
+        plugin.getConfig().set(key, value);
+        plugin.saveConfig();
+        plugin.reloadPlugin();
+        sender.sendMessage("§aSet §f" + key + " §a= §f" + value);
     }
 
     private void relay(CommandSender sender, String[] args) {
@@ -352,6 +563,7 @@ public final class FauxPlayersCommand implements TabExecutor {
         sender.sendMessage("§f/fauxplayers §bsay <name> <message> §8- §7Broadcast fake chat");
         sender.sendMessage("§f/fauxplayers §bget/set <setting> §8- §7Inspect or change settings");
         sender.sendMessage("§f/fauxplayers §brelay <enable|disable|host|port|source|refresh> ...");
+        sender.sendMessage("§f/fauxplayers §breplay <" + CommandCatalog.replayUsage() + "> ...");
     }
 
     @Override
@@ -376,6 +588,12 @@ public final class FauxPlayersCommand implements TabExecutor {
             if (args.length == 2) return partial(args[1], CommandCatalog.RELAY_OPTIONS);
             if (args.length == 3 && args[1].equalsIgnoreCase("source")) {
                 return partial(args[2], List.of("STATUS", "HTTP"));
+            }
+        }
+        if (root.equals("replay")) {
+            if (args.length == 2) return partial(args[1], CommandCatalog.REPLAY_OPTIONS);
+            if (args.length == 3 && List.of("loop", "chat", "discord-chat", "deaths", "events").contains(args[1].toLowerCase(Locale.ROOT))) {
+                return partial(args[2], List.of("true", "false"));
             }
         }
         return List.of();

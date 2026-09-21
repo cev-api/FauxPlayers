@@ -15,6 +15,11 @@ public final class TabListManager {
     private final Map<UUID, UUID> packetIds = new HashMap<>();
     private final Map<UUID, ResolvedState> states = new HashMap<>();
     private final Map<UUID, Long> generations = new HashMap<>();
+    private final Map<UUID, Long> skinRetryAtMillis = new HashMap<>();
+    /** How long to wait before asking Mojang again for a skin that could not be read. */
+    private static final long SKIN_RETRY_MILLIS = 20_000L;
+    /** A name Mojang reports as having no account is still retried, just far less often. */
+    private static final long MISSING_RETRY_MILLIS = 600_000L;
     private PluginConfig currentConfig;
     private final Map<UUID, Long> nextPingUpdateMillis = new HashMap<>();
     private final NmsBackend backend;
@@ -39,10 +44,65 @@ public final class TabListManager {
                 scheduleNextPing(e.uuid());
                 for(Player p:Bukkit.getOnlinePlayers())dispatch(effective(e),p,generation);
             }else if(config.randomPing&&states.containsKey(e.uuid())){
+                retryMissingSkin(e,now);
                 Long next=nextPingUpdateMillis.get(e.uuid());
                 if(next==null||now>=next)updatePing(e.uuid(),e);
+            }else{
+                retryMissingSkin(e,now);
             }
         }
+    }
+
+    /**
+     * Retries an entry that never got a real Mojang profile, or that got one but no skin. A client
+     * keeps the profile from the first add it receives for an id, so the entry is removed and added
+     * again once the real one arrives. Without this, one rate limited lookup during the initial
+     * burst would pin that head to the default skin for the whole session.
+     */
+    private void retryMissingSkin(FauxPlayerEntry entry,long now){
+        ResolvedState state=states.get(entry.uuid());
+        if(state==null)return;
+        boolean needsProfile=state.profile()==null;
+        boolean needsTexture=state.texture()==null;
+        if(!needsProfile&&!needsTexture)return;
+        Long due=skinRetryAtMillis.get(entry.uuid());
+        if(due!=null&&now<due)return;
+        // Keep trying either way. A name Mojang cannot find gets a longer gap between attempts so a
+        // dead account does not cost a request every twenty seconds, but it is never given up on.
+        long interval=profiles.isMissing(state.entry().name())?MISSING_RETRY_MILLIS:SKIN_RETRY_MILLIS;
+        skinRetryAtMillis.put(entry.uuid(),now+interval);
+        if(needsProfile){
+            // The stored id is the placeholder one, so the real skin can only be reached by looking
+            // the name up again.
+            profiles.resolve(state.entry().name()).thenAccept(profile->{
+                if(profile==null)return;
+                profiles.resolveTexture(profile.getUniqueId()).thenAccept(texture->
+                    Bukkit.getScheduler().runTask(plugin,()->reinstall(entry.uuid(),profile,texture)));
+            });
+            return;
+        }
+        profiles.resolveTexture(state.entry.uuid()).thenAccept(texture->{
+            if(texture==null)return;
+            Bukkit.getScheduler().runTask(plugin,()->reinstall(entry.uuid(),state.profile(),texture));
+        });
+    }
+
+    /** Replaces a resolved entry with the better one and rebuilds it on every client. */
+    private void reinstall(UUID logicalId,PlayerProfile profile,ProfileResolver.TextureProperty texture){
+        ResolvedState current=states.get(logicalId);
+        if(current==null)return;
+        boolean changed=profile!=null&&!profile.getUniqueId().equals(current.entry().uuid());
+        if(!changed&&(texture==null||current.texture()!=null))return;
+        FauxPlayerEntry entry=profile==null?current.entry()
+                :new FauxPlayerEntry(profile.getName(),profile.getUniqueId(),current.entry().displayName(),
+                        current.entry().latency(),current.entry().gameMode(),current.entry().remote());
+        UUID packetId=packetIds.getOrDefault(logicalId,logicalId);
+        if(changed)packetIds.put(logicalId,entry.uuid());
+        states.put(logicalId,new ResolvedState(entry,profile,texture));
+        for(Player viewer:Bukkit.getOnlinePlayers())try{
+            backend.remove(viewer,packetId);
+            backend.add(viewer,entry,profile,texture);
+        }catch(Exception ex){plugin.getLogger().fine("Unable to refresh a fake skin: "+ex.getClass().getSimpleName());}
     }    public void sendTo(Player viewer, Collection<FauxPlayerEntry> entries){
         if(backend==null)return;
         for(FauxPlayerEntry e:entries){
@@ -115,11 +175,11 @@ public final class TabListManager {
             backend.remove(p,packetId);
             if(old!=null&&plugin instanceof FauxPlayersPlugin faux&&faux.playerListObjective()!=null)faux.playerListObjective().remove(p,old.entry.name());
         }catch(Exception ex){plugin.getLogger().log(java.util.logging.Level.WARNING,"Unable to remove fake TAB entry",ex);}
-        packetIds.remove(logicalId);states.remove(logicalId);sent.remove(logicalId);nextPingUpdateMillis.remove(logicalId);
+        packetIds.remove(logicalId);states.remove(logicalId);sent.remove(logicalId);nextPingUpdateMillis.remove(logicalId);skinRetryAtMillis.remove(logicalId);
     }
     public void clear(){
         for(UUID id:new ArrayList<>(sent))remove(id);
-        sent.clear();packetIds.clear();states.clear();generations.clear();nextPingUpdateMillis.clear();profiles.clear();
+        sent.clear();packetIds.clear();states.clear();generations.clear();nextPingUpdateMillis.clear();skinRetryAtMillis.clear();profiles.clear();
     }
     private record ResolvedState(FauxPlayerEntry entry, PlayerProfile profile, ProfileResolver.TextureProperty texture) {}
 
@@ -129,9 +189,11 @@ public final class TabListManager {
         private final Method sendMethod,getHandle;
         private final Class<?> actionClass,profileClass,gameTypeClass,componentClass;
         private final Object[] actions;
-        private NmsBackend(JavaPlugin owner,Constructor<?> pc,Constructor<?> ec,Constructor<?> rc,Method sm,Method gh,Class<?> ac,Class<?> gp,Class<?> gt,Class<?> cc,Object[] a){plugin=owner;packetConstructor=pc;entryConstructor=ec;removeConstructor=rc;sendMethod=sm;getHandle=gh;actionClass=ac;profileClass=gp;gameTypeClass=gt;componentClass=cc;actions=a;}
+        private final String[] entryComponentNames;
+        private final java.util.Set<String> reportedEntryTypes=new java.util.HashSet<>();
+        private NmsBackend(JavaPlugin owner,Constructor<?> pc,Constructor<?> ec,Constructor<?> rc,Method sm,Method gh,Class<?> ac,Class<?> gp,Class<?> gt,Class<?> cc,Object[] a,String[] en){plugin=owner;packetConstructor=pc;entryConstructor=ec;removeConstructor=rc;sendMethod=sm;getHandle=gh;actionClass=ac;profileClass=gp;gameTypeClass=gt;componentClass=cc;actions=a;entryComponentNames=en;}
         static NmsBackend create(JavaPlugin plugin){try{
-            ClassLoader l=plugin.getClass().getClassLoader();Class<?> packet=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket",false,l);Class<?> entry=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Entry",false,l);Class<?> action=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Action",false,l);Class<?> rem=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket",false,l);Class<?> gp=Class.forName("com.mojang.authlib.GameProfile",false,l);Class<?> gt=Class.forName("net.minecraft.world.level.GameType",false,l);Class<?> cc=Class.forName("net.minecraft.network.chat.Component",false,l);Constructor<?> pc=null;for(Constructor<?> c:packet.getDeclaredConstructors()){Class<?>[] p=c.getParameterTypes();if(p.length==2&&p[0].isAssignableFrom(EnumSet.class)&&Collection.class.isAssignableFrom(p[1])){pc=c;break;}}if(pc==null)throw new IllegalStateException("player-info constructor not found");Constructor<?> ec=Arrays.stream(entry.getDeclaredConstructors()).max(Comparator.comparingInt(Constructor::getParameterCount)).orElseThrow();Constructor<?> rc=Arrays.stream(rem.getDeclaredConstructors()).filter(c->c.getParameterCount()==1).filter(c->{Class<?> t=c.getParameterTypes()[0];return t.isAssignableFrom(List.class)||Collection.class.isAssignableFrom(t)||Iterable.class.isAssignableFrom(t);}).findFirst().orElseThrow();rc.setAccessible(true);Class<?> craft=Class.forName("org.bukkit.craftbukkit.entity.CraftPlayer",false,l);Method gh=craft.getMethod("getHandle");Method sm=Arrays.stream(Class.forName("net.minecraft.server.network.ServerGamePacketListenerImpl",false,l).getMethods()).filter(m->m.getName().equals("send")&&m.getParameterCount()==1).findFirst().orElseThrow();List<Object> aa=new ArrayList<>();for(String n:List.of("ADD_PLAYER","UPDATE_LISTED","UPDATE_LATENCY","UPDATE_GAME_MODE","UPDATE_DISPLAY_NAME"))aa.add(Enum.valueOf((Class)action,n));return new NmsBackend(plugin,pc,ec,rc,sm,gh,action,gp,gt,cc,aa.toArray());
+            ClassLoader l=plugin.getClass().getClassLoader();Class<?> packet=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket",false,l);Class<?> entry=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Entry",false,l);Class<?> action=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Action",false,l);Class<?> rem=Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket",false,l);Class<?> gp=Class.forName("com.mojang.authlib.GameProfile",false,l);Class<?> gt=Class.forName("net.minecraft.world.level.GameType",false,l);Class<?> cc=Class.forName("net.minecraft.network.chat.Component",false,l);Constructor<?> pc=null;for(Constructor<?> c:packet.getDeclaredConstructors()){Class<?>[] p=c.getParameterTypes();if(p.length==2&&p[0].isAssignableFrom(EnumSet.class)&&Collection.class.isAssignableFrom(p[1])){pc=c;break;}}if(pc==null)throw new IllegalStateException("player-info constructor not found");Constructor<?> ec=Arrays.stream(entry.getDeclaredConstructors()).max(Comparator.comparingInt(Constructor::getParameterCount)).orElseThrow();Constructor<?> rc=Arrays.stream(rem.getDeclaredConstructors()).filter(c->c.getParameterCount()==1).filter(c->{Class<?> t=c.getParameterTypes()[0];return t.isAssignableFrom(List.class)||Collection.class.isAssignableFrom(t)||Iterable.class.isAssignableFrom(t);}).findFirst().orElseThrow();rc.setAccessible(true);Class<?> craft=Class.forName("org.bukkit.craftbukkit.entity.CraftPlayer",false,l);Method gh=craft.getMethod("getHandle");Method sm=Arrays.stream(Class.forName("net.minecraft.server.network.ServerGamePacketListenerImpl",false,l).getMethods()).filter(m->m.getName().equals("send")&&m.getParameterCount()==1).findFirst().orElseThrow();List<Object> aa=new ArrayList<>();for(String n:List.of("ADD_PLAYER","UPDATE_LISTED","UPDATE_LATENCY","UPDATE_GAME_MODE","UPDATE_DISPLAY_NAME"))aa.add(Enum.valueOf((Class)action,n));String[] en=null;if(entry.isRecord()){java.lang.reflect.RecordComponent[] parts=entry.getRecordComponents();en=new String[parts.length];for(int i=0;i<parts.length;i++)en[i]=parts[i].getName();}return new NmsBackend(plugin,pc,ec,rc,sm,gh,action,gp,gt,cc,aa.toArray(),en);
         }catch(Throwable t){plugin.getLogger().warning("NMS TAB backend unavailable: "+t.getClass().getSimpleName()+": "+t.getMessage());return null;}}
         void add(Player viewer,FauxPlayerEntry v,PlayerProfile paperProfile,ProfileResolver.TextureProperty texture)throws Exception{send(viewer,buildPacket(v,paperProfile,texture,actions));}
         void updateLatency(Player viewer,FauxPlayerEntry v,PlayerProfile paperProfile,ProfileResolver.TextureProperty texture)throws Exception{Object latency=Enum.valueOf((Class)actionClass,"UPDATE_LATENCY");Object display=Enum.valueOf((Class)actionClass,"UPDATE_DISPLAY_NAME");send(viewer,buildPacket(v,paperProfile,texture,new Object[]{latency,display}));}
@@ -177,16 +239,31 @@ public final class TabListManager {
             Object gp=createGameProfile(v,paperProfile,texture);
             Object comp=createDisplayComponent(v);
             Object gt=Enum.valueOf((Class)gameTypeClass,v.gameMode());
+            // Fill by component name where the entry is a record. Filling by position or by
+            // type breaks whenever Minecraft adds a field: 26.3 added showHat and listOrder,
+            // which a type scan would have set to the ping value instead of the intended one.
             Object[] args=new Object[entryConstructor.getParameterCount()];
+            String[] names=entryComponentNames;
             for(int i=0;i<args.length;i++){
+                String name=names==null?null:names[i];
                 Class<?> t=entryConstructor.getParameterTypes()[i];
                 if(t==UUID.class)args[i]=v.uuid();
                 else if(t==profileClass)args[i]=gp;
-                else if(t==boolean.class)args[i]=true;
-                else if(t==int.class)args[i]=v.latency();
                 else if(t==gameTypeClass)args[i]=gt;
                 else if(t==componentClass)args[i]=comp;
+                else if("listed".equals(name))args[i]=true;
+                // Vanilla passes isModelPartShown(HAT) here, true for a normal player, so the
+                // outer skin layer renders exactly as it does on a real player entry.
+                else if("showHat".equals(name))args[i]=true;
+                else if("listOrder".equals(name))args[i]=0;
+                else if("latency".equals(name))args[i]=v.latency();
+                else if(t==boolean.class)args[i]=false;
+                else if(t==int.class)args[i]=0;
                 else args[i]=null;
+                if(name==null&&t!=UUID.class&&t!=profileClass&&t!=gameTypeClass&&t!=componentClass&&!t.isPrimitive()&&!reportedEntryTypes.contains(t.getName())){
+                    reportedEntryTypes.add(t.getName());
+                    plugin.getLogger().warning("Player-info entry field of type "+t.getName()+" is not understood on this server version; it is sent as null.");
+                }
             }
             Object e=entryConstructor.newInstance(args);
             EnumSet set=EnumSet.noneOf((Class)actionClass);for(Object a:selected)set.add((Enum)a);

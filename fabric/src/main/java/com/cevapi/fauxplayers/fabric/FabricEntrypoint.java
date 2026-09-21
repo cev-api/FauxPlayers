@@ -6,9 +6,12 @@ import com.cevapi.fauxplayers.core.PlayerSnapshot;
 import com.cevapi.fauxplayers.core.PluginConfig;
 import com.cevapi.fauxplayers.core.PresentationMath;
 import com.cevapi.fauxplayers.core.RelayManager;
+import com.cevapi.fauxplayers.core.ReplayManager;
 import com.cevapi.fauxplayers.core.YamlConfig;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.ArgumentType;
+import com.mojang.brigadier.arguments.BoolArgumentType;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -25,6 +28,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -60,10 +64,13 @@ public final class FabricEntrypoint implements ModInitializer {
     private YamlConfig document;
     private PluginConfig config;
     private RelayManager relay;
+    private ReplayManager replay;
     private FabricTabManager tab;
     private FabricTabPlaceholderIntegration tabPlaceholders;
     private FabricMessageFormat messageFormat;
     private PlayerSnapshot announcedRemote = PlayerSnapshot.empty();
+    /** The fake entries currently shown, so a configuration change can announce what it adds or removes. */
+    private int tickFailures;
     private Instant announcedRemoteRefresh;
     private long tick;
 
@@ -106,6 +113,7 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private void stop(MinecraftServer minecraftServer) {
         if (relay != null) relay.stop();
+        if (replay != null) replay.stop();
         if (tabPlaceholders != null) tabPlaceholders.close();
         if (tab != null) tab.clear();
         tabPlaceholders = null;
@@ -118,8 +126,16 @@ public final class FabricEntrypoint implements ModInitializer {
     private void tick(MinecraftServer minecraftServer) {
         if (minecraftServer != server || config == null || tab == null) return;
         if (++tick % 5 == 0) {
-            tab.sync(config, tabEntries());
-            announceRemoteChanges();
+            // A failure here must not stop the replay from being driven again on the next tick.
+            try {
+                if (replay != null) replay.tick();
+                tab.sync(config, tabEntries());
+                announceRemoteChanges();
+            } catch (Throwable error) {
+                if (tickFailures++ < 3) {
+                    warn("Replay presentation tick failed; the loop continues: " + error);
+                }
+            }
         }
         if (tabPlaceholders != null) tabPlaceholders.tick();
     }
@@ -135,6 +151,9 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private void reload() {
         try {
+            // Captured before the new settings load, so the announcement covers only this change.
+            PlayerSnapshot snapshot = relay != null ? relay.snapshot() : PlayerSnapshot.empty();
+            List<FauxPlayerEntry> before = entriesFor(config, snapshot);
             Files.createDirectories(configPath.getParent());
             if (!Files.exists(configPath)) {
                 try (var input = FabricEntrypoint.class.getResourceAsStream("/config.yml")) {
@@ -153,7 +172,19 @@ public final class FabricEntrypoint implements ModInitializer {
                 });
             }
             if (tab == null) tab = new FabricTabManager(server);
+            tab.warnHeadFailures(this::warn);
+            if (replay == null) {
+                replay = new ReplayManager(new ReplayManager.Host() {
+                    @Override public void fine(String message) { log(message); }
+                    @Override public void warning(String message) { warn(message); }
+                    @Override public void onReplayEvent(ReplayManager.Event event) { replayEvent(event); }
+                });
+            }
+            replay.start(config, replayPath(), knownReplayPlayers());
             relay.start(config);
+            // Announce what this change adds or removes before the list is rebuilt, so switching a
+            // mode off reads as its players leaving rather than the entries vanishing silently.
+            announceFauxChanges(before, entriesFor(config, snapshot));
             if (config.enabled) tab.sync(config, tabEntries()); else tab.clear();
         } catch (IOException error) {
             warn("Unable to load config: " + error.getMessage());
@@ -166,10 +197,75 @@ public final class FabricEntrypoint implements ModInitializer {
         if (config != null && config.enabled && tab != null) tab.sendTo(player);
     }
 
+    private Path replayPath() {
+        if (config == null || config.replayFile == null || config.replayFile.isBlank()) return null;
+        Path resolved = Path.of(config.replayFile);
+        return resolved.isAbsolute() ? resolved : configPath.getParent().resolve(config.replayFile);
+    }
+
+    /** Names the server already knows are in-game players, used to read relayed chat correctly. */
+    private Set<String> knownReplayPlayers() {
+        Set<String> names = new LinkedHashSet<>();
+        if (config == null) return names;
+        config.statics.forEach(entry -> names.add(entry.name()));
+        relaySnapshot().players().forEach(entry -> names.add(entry.name()));
+        return names;
+    }
+
+    /**
+     * Compares the player list before a configuration change with the list after it, and announces
+     * the difference. Comparing against a stored baseline instead would also pick up players the
+     * relay or the replay added on their own, which made an unrelated command announce the whole
+     * relay roster as joining.
+     */
+    private void announceFauxChanges(List<FauxPlayerEntry> before, List<FauxPlayerEntry> after) {
+        Map<String, String> was = new LinkedHashMap<>();
+        for (FauxPlayerEntry entry : before) was.put(entry.name().toLowerCase(Locale.ROOT), entry.name());
+        Map<String, String> now = new LinkedHashMap<>();
+        for (FauxPlayerEntry entry : after) now.put(entry.name().toLowerCase(Locale.ROOT), entry.name());
+        for (Map.Entry<String, String> entry : now.entrySet()) {
+            if (!was.containsKey(entry.getKey())) fakeMessage(entry.getValue(), true);
+        }
+        for (Map.Entry<String, String> entry : was.entrySet()) {
+            if (!now.containsKey(entry.getKey())) fakeMessage(entry.getValue(), false);
+        }
+    }
+
+    /** The player list one configuration would produce, using a snapshot captured once for both sides. */
+    private List<FauxPlayerEntry> entriesFor(PluginConfig candidate, PlayerSnapshot snapshot) {
+        if (candidate == null || !candidate.enabled || !candidate.tabEnabled) return List.of();
+        PlayerSnapshot gated = candidate.relayEnabled ? snapshot : PlayerSnapshot.empty();
+        List<FauxPlayerEntry> replayed = candidate.replayEnabled && replay != null ? replay.entries() : List.of();
+        return PresentationMath.withoutRealPlayers(
+                PresentationMath.tabEntries(candidate, gated, replayed), onlineRealNames());
+    }
+
+    /** Replayed lines: only the roster stays fake, the text is broadcast like a system message. */
+    private void replayEvent(ReplayManager.Event event) {
+        if (server == null) return;
+        // Never speak for, or list, someone who is actually on the server. Their own entry and their
+        // own words win, so the replayed line is left out rather than shown beside the real player.
+        if (config.replaySkipRealPlayers && event.actor() != null && !event.actor().isBlank()
+                && isOnlineReal(event.actor())) return;
+        switch (event.kind()) {
+            case JOIN -> fakeMessage(event.actor(), true);
+            case LEAVE -> fakeMessage(event.actor(), false);
+            case CHAT -> server.getPlayerList().broadcastSystemMessage(
+                    colored("§7<" + event.actor() + "> §f" + event.text()), false);
+            case DISCORD -> server.getPlayerList().broadcastSystemMessage(
+                    colored("§9[Discord] §7<" + event.actor() + "> §f" + event.text()), false);
+            default -> {
+                if (event.text() != null && !event.text().isBlank()) {
+                    server.getPlayerList().broadcastSystemMessage(colored("§7" + event.text()), false);
+                }
+            }
+        }
+    }
+
     public ServerStatus rewriteStatus(MinecraftServer minecraftServer, ServerStatus original) {
         if (minecraftServer != server || config == null || !config.enabled || !config.statusEnabled) return original;
-        PlayerSnapshot remote = relay == null ? PlayerSnapshot.empty() : relay.snapshot();
-        List<FauxPlayerEntry> faux = PresentationMath.statusEntries(config, remote);
+        PlayerSnapshot remote = relaySnapshot();
+        List<FauxPlayerEntry> faux = statusEntries();
         List<FauxPlayerEntry> real = minecraftServer.getPlayerList().getPlayers().stream()
                 .map(player -> new FauxPlayerEntry(player.getGameProfile().name(), player.getUUID(),
                         player.getGameProfile().name(), 0, "SURVIVAL", false)).toList();
@@ -184,12 +280,38 @@ public final class FabricEntrypoint implements ModInitializer {
                 original.favicon(), original.enforcesSecureChat());
     }
 
-    private List<FauxPlayerEntry> remoteEntries() {
-        return config != null && relay != null && config.relayEnabled ? relay.snapshot().players() : List.of();
+    private PlayerSnapshot relaySnapshot() {
+        // The cache outlives a disable so it can be used again on re-enable, but a disabled relay
+        // must never keep contributing players to the list.
+        return config != null && config.relayEnabled && relay != null
+                ? relay.snapshot() : PlayerSnapshot.empty();
     }
 
+    private List<FauxPlayerEntry> remoteEntries() {
+        return relaySnapshot().players();
+    }
+
+    private List<FauxPlayerEntry> replayEntries() {
+        return config == null || !config.replayEnabled || replay == null ? List.of() : replay.entries();
+    }
     private List<FauxPlayerEntry> tabEntries() {
-        return PresentationMath.tabEntries(config, relay == null ? PlayerSnapshot.empty() : relay.snapshot());
+        return PresentationMath.withoutRealPlayers(PresentationMath.tabEntries(config,
+                relaySnapshot(), replayEntries()), onlineRealNames());
+    }
+
+    /** Names of the real players online, so a fake entry never duplicates one of them. */
+    private Set<String> onlineRealNames() {
+        Set<String> names = new LinkedHashSet<>();
+        if (server == null) return names;
+        server.getPlayerList().getPlayers()
+                .forEach(player -> names.add(player.getGameProfile().name()));
+        return names;
+    }
+
+    /** True when a real player of that name is online right now. */
+    private boolean isOnlineReal(String name) {
+        if (server == null) return false;
+        return server.getPlayerList().getPlayerByName(name) != null;
     }
 
     public int displayedOnlineCount() {
@@ -207,7 +329,8 @@ public final class FabricEntrypoint implements ModInitializer {
     }
 
     private List<FauxPlayerEntry> statusEntries() {
-        return PresentationMath.statusEntries(config, relay == null ? PlayerSnapshot.empty() : relay.snapshot());
+        return PresentationMath.withoutRealPlayers(PresentationMath.statusEntries(config,
+                relaySnapshot(), replayEntries()), onlineRealNames());
     }
 
     private void remoteChanged(PlayerSnapshot previous, PlayerSnapshot next) {
@@ -330,6 +453,77 @@ public final class FabricEntrypoint implements ModInitializer {
                         StringArgumentType.getString(context, "hostname"))));
         rootBuilder.then(relayBuilder);
 
+        var replayBuilder = ctl("replay")
+                .executes(context -> replay(context.getSource()));
+        replayBuilder.then(ctl("status")
+                .executes(context -> replay(context.getSource())));
+        replayBuilder.then(ctl("enable")
+                .executes(context -> setValue(context, "replay.enabled", true)));
+        replayBuilder.then(ctl("enabled")
+                .executes(context -> setValue(context, "replay.enabled", true)));
+        replayBuilder.then(ctl("disable")
+                .executes(context -> setValue(context, "replay.enabled", false)));
+        replayBuilder.then(ctl("restart").executes(context -> {
+            if (replay != null) replay.restart();
+            return message(context, "§aReplay restarted from the first line.");
+        }));
+        replayBuilder.then(ctl("seek")
+                .executes(context -> message(context, "§eUsage: §f/fauxplayers replay seek <line>"))
+                .then(arg("line", IntegerArgumentType.integer(0))
+                        .executes(context -> seek(context, IntegerArgumentType.getInteger(context, "line"), false))));
+        replayBuilder.then(ctl("skip")
+                .executes(context -> message(context, "§eUsage: §f/fauxplayers replay skip <lines>§e, negative to go back"))
+                .then(arg("lines", IntegerArgumentType.integer())
+                        .executes(context -> seek(context, IntegerArgumentType.getInteger(context, "lines"), true))));
+        replayBuilder.then(ctl("replace")
+                .executes(context -> message(context, "§eUsage: §f/fauxplayers replay replace <from>=<to>"))
+                .then(arg("from=to", StringArgumentType.greedyString())
+                        .executes(context -> replace(context, StringArgumentType.getString(context, "from=to")))));
+        replayBuilder.then(ctl("unreplace")
+                .executes(context -> message(context, "§eUsage: §f/fauxplayers replay unreplace <from>"))
+                .then(arg("from", StringArgumentType.greedyString())
+                        .executes(context -> unreplace(context, StringArgumentType.getString(context, "from")))));
+        replayBuilder.then(ctl("replacements")
+                .executes(context -> replacements(context.getSource())));
+        replayBuilder.then(ctl("file")
+                .executes(context -> message(context, "§eUsage: §f/fauxplayers replay file <path>"))
+                .then(arg("path", StringArgumentType.greedyString())
+                        .executes(context -> setValue(context, "replay.file",
+                                StringArgumentType.getString(context, "path")))));
+        replayBuilder.then(ctl("speed")
+                .then(arg("multiplier", DoubleArgumentType.doubleArg(0.01))
+                        .executes(context -> setValue(context, "replay.speed",
+                                DoubleArgumentType.getDouble(context, "multiplier")))));
+        replayBuilder.then(ctl("loop")
+                .then(arg("value", BoolArgumentType.bool())
+                        .executes(context -> setValue(context, "replay.loop",
+                                BoolArgumentType.getBool(context, "value")))));
+        replayBuilder.then(ctl("chat")
+                .then(arg("value", BoolArgumentType.bool())
+                        .executes(context -> setValue(context, "replay.chat",
+                                BoolArgumentType.getBool(context, "value")))));
+        replayBuilder.then(ctl("discord-chat")
+                .then(arg("value", BoolArgumentType.bool())
+                        .executes(context -> setValue(context, "replay.discord-chat",
+                                BoolArgumentType.getBool(context, "value")))));
+        replayBuilder.then(ctl("deaths")
+                .then(arg("value", BoolArgumentType.bool())
+                        .executes(context -> setValue(context, "replay.deaths",
+                                BoolArgumentType.getBool(context, "value")))));
+        replayBuilder.then(ctl("events")
+                .then(arg("value", BoolArgumentType.bool())
+                        .executes(context -> setValue(context, "replay.events",
+                                BoolArgumentType.getBool(context, "value")))));
+        replayBuilder.then(ctl("maximum-gap-seconds")
+                .then(arg("seconds", IntegerArgumentType.integer(0))
+                        .executes(context -> setValue(context, "replay.maximum-gap-seconds",
+                                IntegerArgumentType.getInteger(context, "seconds")))));
+        replayBuilder.then(ctl("maximum-players")
+                .then(arg("players", IntegerArgumentType.integer(0))
+                        .executes(context -> setValue(context, "replay.maximum-players",
+                                IntegerArgumentType.getInteger(context, "players")))));
+        rootBuilder.then(replayBuilder);
+
         // The server-operator requirement is applied to every node in the tree, not
         // just the roots. Brigadier parses input syntactically without checking
         // requirements, so suggestion requests such as "/fauxplayers " or
@@ -378,7 +572,8 @@ public final class FabricEntrypoint implements ModInitializer {
         message(source, "§f/fauxplayers §bremove <name> §8- §7Remove a static fake");
         message(source, "§f/fauxplayers §bsay <name> <message> §8- §7Broadcast fake chat");
         message(source, "§f/fauxplayers §bget/set <setting> §8- §7Inspect or change settings");
-        return message(source, "§f/fauxplayers §brelay <enable|disable|host|port|source|refresh> ...");
+        message(source, "§f/fauxplayers §brelay <enable|disable|host|port|source|refresh> ...");
+        return message(source, "§f/fauxplayers §breplay <" + CommandCatalog.replayUsage() + "> ...");
     }
 
     private int status(CommandSourceStack source) {
@@ -390,6 +585,9 @@ public final class FabricEntrypoint implements ModInitializer {
         message(source, "§eRelayed players: §f" + snapshot.players().size() + " §8| §7names: §f" + namesText(snapshot.players()));
         message(source, "§eRemote reported: §f" + snapshot.reportedOnline() + " §8| §7max: §f" + snapshot.reportedMax());
         message(source, "§eSource: §f" + config.relaySource + " §8| §7enabled: §f" + config.relayEnabled + " §8| §7cache age: §f" + age);
+        message(source, "§eReplay: §f" + config.replayEnabled + " §8| §7lines: §f"
+                + (replay == null ? 0 : replay.position()) + "§7/§f" + (replay == null ? 0 : replay.eventCount())
+                + " §8| §7players: §f" + (replay == null ? 0 : replay.playerCount()));
         return message(source, "§eLast error: §f" + (relay.lastError() == null ? "none" : relay.lastError()));
     }
 
@@ -400,7 +598,8 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private int list(CommandSourceStack source) {
         message(source, "§eStatic fake names: §f" + namesText(config.statics));
-        return message(source, "§eCached remote names: §f" + namesText(remoteEntries()));
+        message(source, "§eCached remote names: §f" + namesText(remoteEntries()));
+        return message(source, "§eReplayed names: §f" + namesText(replayEntries()));
     }
 
     private String namesText(Collection<FauxPlayerEntry> entries) {
@@ -497,8 +696,119 @@ public final class FabricEntrypoint implements ModInitializer {
         return message(source, "§7Use §f/fauxplayers relay <enable|disable|host|port|source|refresh> ...");
     }
 
+    /** Formats a duration as a compact d/h/m figure for the replay clock. */
+    private static String span(long millis) {
+        long secs = Math.max(0, millis) / 1000;
+        long days = secs / 86_400;
+        long hours = secs % 86_400 / 3_600;
+        long minutes = secs % 3_600 / 60;
+        if (days > 0) return days + "d " + hours + "h " + minutes + "m";
+        if (hours > 0) return hours + "h " + minutes + "m";
+        if (minutes > 0) return minutes + "m " + secs % 60 + "s";
+        return secs + "s";
+    }
+
+    private static String seconds(long millis) {
+        long value = Math.max(0, millis) / 1000;
+        return value < 60 ? value + "s" : span(millis);
+    }
+
+    private int seek(CommandContext<CommandSourceStack> context, int lines, boolean relative) {
+        if (replay == null) return message(context, "§cNo replay timeline is loaded yet.");
+        boolean moved = relative ? replay.skip(lines) : replay.seek(lines);
+        if (!moved) return message(context, "§cNo replay timeline is loaded yet.");
+        return message(context, "§aNow at line §f" + replay.position() + "§a/§f" + replay.eventCount()
+                + "§a, players: §f" + replay.playerCount());
+    }
+
+    /** Adds a rewrite from the {@code from=to} form, which allows spaces on both sides. */
+    private int replace(CommandContext<CommandSourceStack> context, String pair) {
+        int split = pair.indexOf('=');
+        if (split <= 0) {
+            message(context, "§eUsage: §f/fauxplayers replay replace <from>=<to>");
+            return message(context, "§7The first §f=§7 splits it, so spaces work on both sides.");
+        }
+        String from = pair.substring(0, split).strip();
+        String to = pair.substring(split + 1).strip();
+        List<Map<String, Object>> list = new java.util.ArrayList<>();
+        for (String[] rule : config.replayReplacements) {
+            if (rule[0].equals(from)) {
+                message(context, "§eReplacing the existing rule for §f" + from + "§e.");
+                continue;
+            }
+            list.add(replacement(rule[0], rule[1]));
+        }
+        list.add(replacement(from, to));
+        return applyReplacements(context,
+                "§aAdded replacement: §f" + from + " §a-> §f" + (to.isEmpty() ? "(removed)" : to), list);
+    }
+
+    private int unreplace(CommandContext<CommandSourceStack> context, String from) {
+        String needle = from.strip();
+        List<Map<String, Object>> list = new java.util.ArrayList<>();
+        boolean removed = false;
+        for (String[] rule : config.replayReplacements) {
+            if (rule[0].equals(needle)) {
+                removed = true;
+                continue;
+            }
+            list.add(replacement(rule[0], rule[1]));
+        }
+        if (!removed) return message(context, "§cNo replacement starts with §f" + needle + "§c.");
+        return applyReplacements(context, "§aRemoved the replacement for §f" + needle, list);
+    }
+
+    private static Map<String, Object> replacement(String from, String to) {
+        Map<String, Object> rule = new java.util.LinkedHashMap<>();
+        rule.put("from", from);
+        rule.put("to", to);
+        return rule;
+    }
+
+    private int applyReplacements(CommandContext<CommandSourceStack> context, String message,
+                                  List<Map<String, Object>> list) {
+        document.set("replay.replacements", list);
+        saveAndReload();
+        message(context, message);
+        return message(context, "§7Run §f/fauxplayers replay restart §7to reapply it to the loaded lines.");
+    }
+
+    private int replacements(CommandSourceStack source) {
+        if (config.replayReplacements.isEmpty()) return message(source, "§bReplay replacements §8» §7none");
+        message(source, "§bReplay replacements §8» §f" + config.replayReplacements.size());
+        for (int index = 0; index < config.replayReplacements.size(); index++) {
+            String[] rule = config.replayReplacements.get(index);
+            message(source, "§7" + index + ". §f" + rule[0] + " §8-> §f"
+                    + (rule[1].isEmpty() ? "(removed)" : rule[1]));
+        }
+        return 1;
+    }
+
+    private int replay(CommandSourceStack source) {
+        message(source, "§bReplay §8» §7enabled=§f" + config.replayEnabled + " §8| §7file=§f" + config.replayFile
+                + " §8| §7speed=§f" + config.replaySpeed + " §8| §7loop=§f" + config.replayLoop);
+        if (replay == null) return message(source, "§7No replay timeline is loaded yet.");
+        message(source, "§7Lines: §f" + replay.position() + "§7/§f" + replay.eventCount()
+                + " §8| §7players: §f" + replay.playerCount() + " §8| §7finished: §f" + replay.finished());
+        message(source, "§7Clock: §f" + span(replay.clockMillis()) + "§7 of §f" + span(replay.timelineMillis())
+                + " §8| §7next line in §f" + (replay.nextDueInMillis() < 0 ? "(none)" : seconds(replay.nextDueInMillis()))
+                + " §8| §7ticks driven: §f" + replay.ticks());
+        message(source, "§7Loaded: §f" + (replay.loadedFile() == null ? "(none)" : replay.loadedFile()));
+        List<String> bridges = replay.bridgeAuthors();
+        message(source, "§7Server messages posted by: §f" + (bridges.isEmpty()
+                ? "(no account detected; only joins and leaves are recognised)"
+                : String.join("§8, §f", bridges)));
+        message(source, "§7In-game chat relayed by: §f" + (replay.relayAuthors().isEmpty()
+                ? "(no relay account detected)"
+                : replay.relayAuthors().size() + " account(s)"));
+        message(source, "§7Use §f/fauxplayers replay <" + CommandCatalog.replayUsage() + "> ...");
+        return replay.lastError() == null ? 1 : message(source, "§cLast error: §f" + replay.lastError());
+    }
+
     private Object parse(String raw, Object old) {
         if (old instanceof Boolean) return Boolean.parseBoolean(raw);
+        if (old instanceof Double || old instanceof Float)
+            try { return Double.parseDouble(raw); } catch (NumberFormatException ignored) { return null; }
         if (old instanceof Number) try { return Integer.parseInt(raw); } catch (NumberFormatException ignored) { return null; }
         return raw;
     }

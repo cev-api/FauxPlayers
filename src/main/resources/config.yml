@@ -4,6 +4,7 @@ status:
   include-real-players: true
   include-static-fakes: true
   include-relayed-players: true
+  include-replay: true
 count:
   mode: COMBINED
   fixed: 20
@@ -21,6 +22,7 @@ tab:
   enabled: true
   include-static-fakes: true
   include-relayed-players: true
+  include-replay: true
   default-latency: 50
   random-ping:
     enabled: true
@@ -33,6 +35,33 @@ messages:
   enabled: true
   join: AUTO
   leave: AUTO
+
+# Replays an exported Discord chat CSV into the server, in order and in a loop.
+# The path is relative to the plugin data folder unless it is absolute.
+replay:
+  enabled: false
+  file: replay/chat.csv
+  speed: 1.0
+  loop: true
+  maximum-gap-seconds: 30
+  maximum-players: 100
+  # In-game chat, relayed to Discord by the server's own bot account.
+  chat: true
+  # Discord messages, which never become players and never get a player head.
+  discord-chat: true
+  deaths: true
+  events: true
+  # Report a leap as players leaving and joining, instead of a silent flicker.
+  announce-seeks: true
+  # Leave out anything attributed to a real player who is online: no second entry for them and no
+  # chat replayed under their name.
+  skip-real-players: true
+  # Literal text rewrites applied to every replayed line, first match first.
+  # replacements:
+  #   - from: "annoying phrase"
+  #     to: "replacement"
+  #   - from: "discord.gg/abcdef"
+  #     to: ""
 
 static-players:
   - name: Herobrine
