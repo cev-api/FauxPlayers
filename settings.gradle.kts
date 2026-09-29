@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "FauxPlayers"
-include(":common", ":paper", ":fabric")
+include(":common", ":paper", ":fabric", ":fabric26_3")

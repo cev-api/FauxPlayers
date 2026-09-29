@@ -4,8 +4,8 @@ FauxPlayers adds display-only player entries to Minecraft.
 
 It supports:
 
-- Paper 1.21.x -> 26.2
-- Fabric for Minecraft 26.2.
+- Paper 26.3 (single Paper JAR).
+- Fabric for Minecraft 26.2 and 26.3.
 - Server status responses.
 - Manipulating the in-game player list.
 - Relaying players from another server or HTTP source.
@@ -13,7 +13,8 @@ It supports:
 - Simulated ping, skins, heads, and TAB scores.
 
 The project has one shared core.
-The build creates one Paper JAR and one Fabric JAR.
+The build creates one Paper JAR and separate Fabric JARs for Minecraft 26.2
+and 26.3.
 
 ## Important
 
@@ -45,15 +46,15 @@ Build:
 
 Paper:
 
-- Paper 1.21.x -> 26.2
-- Java 21.
+- Paper 26.3: Java 25.
 - ProtocolLib for Paper packet features.
 
 Fabric:
 
-- Minecraft 26.2.
+- Minecraft 26.2 or 26.3.
 - Fabric Loader 0.19.3 or later.
-- Fabric API 0.154.2+26.2 or later.
+- Fabric API 0.159.0+26.2 or later for Minecraft 26.2.
+- Fabric API 0.160.5+26.3 or later for Minecraft 26.3.
 - Java 25.
 
 Optional:
@@ -77,8 +78,9 @@ Linux or macOS:
 The build creates:
 
 ~~~text
-paper/build/libs/FauxPlayers-1.0.0-paper.jar
-fabric/build/libs/FauxPlayers-1.0.0-fabric.jar
+paper/build/libs/FauxPlayers-1.0.3-paper.jar
+fabric/build/libs/FauxPlayers-1.0.3-fabric.jar
+fabric26_3/build/libs/FauxPlayers-1.0.3-fabric-26.3.jar
 ~~~
 
 Install only the JAR for your server platform.

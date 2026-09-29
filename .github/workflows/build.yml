@@ -31,4 +31,5 @@ jobs:
           path: |
             paper/build/libs/*-paper.jar
             fabric/build/libs/*-fabric.jar
+            fabric26_3/build/libs/*-fabric-26.3.jar
 
