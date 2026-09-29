@@ -42,6 +42,12 @@ public final class ReplayManager {
     }
 
     private static final int MAX_EVENTS_PER_TICK = 200;
+    /**
+     * How often, at most, the cursor is written to disk. The file is a few bytes, and this keeps a
+     * busy replay from touching the disk on every tick while still bounding how much of a restart's
+     * progress could be lost.
+     */
+    private static final long POSITION_WRITE_INTERVAL_MILLIS = 1000L;
     /** Posts needed before an account is accepted as the server's bridge bot. */
     private static final int BRIDGE_MINIMUM_POSTS = 2;
     /** How far the busiest server-message account must lead the runner-up. */
@@ -114,6 +120,11 @@ public final class ReplayManager {
     private volatile List<String> relayAuthors = List.of();
     private volatile Set<String> knownPlayers = Set.of();
     private volatile String lastError;
+    /** The cursor already written to disk, and when, so the write above is throttled. */
+    private int persistedCursor = -1;
+    private long persistedAtMillis;
+    /** False while the replay is switched off, so it is known when a start is a resume. */
+    private boolean active;
     private volatile boolean finished;
     private int cursor;
     private long virtualMillis;
@@ -142,23 +153,39 @@ public final class ReplayManager {
         this.knownPlayers = knownPlayers == null ? Set.of() : new LinkedHashSet<>(knownPlayers);
         this.replacements = config.replayReplacements;
         if (!config.replayEnabled || file == null) {
-            clear();
+            // The cursor is kept so re-enabling, or a restart, resumes where the replay stopped.
+            // Only the roster is dropped, because nothing from a disabled replay is ever displayed.
+            roster.clear();
+            rosterEntries = List.of();
+            active = false;
             return;
         }
-        if (timeline != null && file.equals(loadedFile)) return;
-        load(config, file);
+        if (timeline != null && file.equals(loadedFile)) {
+            // Re-enabled after being switched off: rebuild the roster the cursor implies instead of
+            // starting over, so the player list matches the position the replay resumes from.
+            if (!active && cursor > 0) rebuildRoster(cursor, false);
+            active = true;
+            return;
+        }
+        active = true;
+        load(config, file, true);
     }
 
     public synchronized void stop() {
+        // Written before the cursor is cleared, so the next start resumes where this one stopped.
+        PluginConfig current = config;
+        if (current != null && current.replayEnabled) savePosition();
         clear();
         timeline = null;
         loadedFile = null;
+        active = false;
     }
 
     /** Re-reads the file and restarts the timeline from the first line. */
     public synchronized void restart() {
         if (config != null && config.replayEnabled && file != null) {
-            load(config, file);
+            clearPosition(file);
+            load(config, file, false);
             return;
         }
         clear();
@@ -177,6 +204,20 @@ public final class ReplayManager {
         int target = Math.max(0, Math.min(line, events.size()));
         PluginConfig current = config;
         boolean announce = current != null && current.replayAnnounceSeeks;
+        rebuildRoster(target, announce);
+        return true;
+    }
+
+    /**
+     * Moves the cursor to a line by replaying the joins and leaves before it into the roster, so the
+     * player list is correct without broadcasting history. The announcement is left to the caller:
+     * a seek wants it, and a restart resuming a saved position does not, because a start-up restore
+     * must not read as everyone joining.
+     */
+    private void rebuildRoster(int target, boolean announce) {
+        List<Event> events = timeline;
+        if (events == null) return;
+        PluginConfig current = config;
         // Who was in the game at the old line, so the jump can be reported as people leaving and
         // joining. Without that the player list would simply flicker with no explanation.
         Map<String, String> before = new LinkedHashMap<>(roster);
@@ -210,7 +251,6 @@ public final class ReplayManager {
                 }
             }
         }
-        return true;
     }
 
     /**
@@ -253,6 +293,7 @@ public final class ReplayManager {
                 host.fine("Replay finished after " + events.size() + " lines.");
             }
         }
+        persistPosition();
     }
 
     /** Snapshot of the players the replay currently considers online. */
@@ -334,12 +375,64 @@ public final class ReplayManager {
         finished = false;
     }
 
-    private void load(PluginConfig current, Path source) {
+    /**
+     * The cursor sidecar for a replay file. It sits beside the file so several replays cannot
+     * collide, and it holds a single line number; a missing or unreadable file simply means the
+     * replay starts from the first line.
+     */
+    private static Path positionFile(Path source) {
+        Path name = source.getFileName();
+        return name == null ? source.resolveSibling("replay.position")
+                : source.resolveSibling(name + ".position");
+    }
+
+    private int readPosition(Path source, int size) {
+        try {
+            Path path = positionFile(source);
+            if (!Files.isRegularFile(path)) return 0;
+            int saved = Integer.parseInt(Files.readString(path, StandardCharsets.UTF_8).trim());
+            return Math.max(0, Math.min(saved, size));
+        } catch (Exception error) {
+            return 0;
+        }
+    }
+
+    /** Writes the cursor, throttled so a fast replay does not touch the disk on every tick. */
+    private synchronized void persistPosition() {
+        if (loadedFile == null || cursor == persistedCursor) return;
+        long now = System.currentTimeMillis();
+        if (now - persistedAtMillis < POSITION_WRITE_INTERVAL_MILLIS) return;
+        persistedAtMillis = now;
+        savePosition();
+    }
+
+    private void savePosition() {
+        Path source = loadedFile;
+        if (source == null) return;
+        persistedCursor = cursor;
+        persistedAtMillis = System.currentTimeMillis();
+        try {
+            Files.writeString(positionFile(source), Integer.toString(cursor), StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            // Losing the position only means the next start begins at the first line.
+        }
+    }
+
+    private void clearPosition(Path source) {
+        persistedCursor = -1;
+        try {
+            Files.deleteIfExists(positionFile(source));
+        } catch (IOException error) {
+            // A leftover position is clamped to the timeline when it is read, so this is harmless.
+        }
+    }
+
+    private void load(PluginConfig current, Path source, boolean resume) {
         if (loader != null && loader.isAlive()) loader.interrupt();
         loader = new Thread(() -> {
             try {
                 List<Event> parsed = parse(current, source);
-                publish(parsed, source);
+                publish(parsed, source, resume);
             } catch (Exception error) {
                 lastError = error.getClass().getSimpleName() + ": " + error.getMessage();
                 host.warning("Unable to read the replay file " + source + ": " + lastError);
@@ -349,11 +442,24 @@ public final class ReplayManager {
         loader.start();
     }
 
-    private synchronized void publish(List<Event> parsed, Path source) {
+    private synchronized void publish(List<Event> parsed, Path source, boolean resume) {
+        // Read before the timeline is exposed, so the game thread cannot overwrite the saved
+        // position with the freshly cleared cursor before it is restored.
+        int saved = resume ? readPosition(source, parsed.size()) : 0;
         timeline = parsed;
         loadedFile = source;
         lastError = null;
         clear();
+        if (resume) {
+            // A restart continues where the previous session stopped, rebuilt silently so the
+            // restored roster does not read as everyone joining at once.
+            if (saved > 0) {
+                rebuildRoster(saved, false);
+                persistedCursor = saved;
+            }
+        } else {
+            clearPosition(source);
+        }
         host.fine("Replay loaded " + parsed.size() + " of the lines in " + source.getFileName()
                 + "; server messages are posted by "
                 + (bridgeAuthors.isEmpty() ? "no detected account" : String.join(", ", bridgeAuthors)) + ".");
@@ -511,10 +617,13 @@ public final class ReplayManager {
                 continue;
             }
             if (relays.contains(line.id())) {
-                // The relay posts under the in-game player's own name. A name that never joined is
-                // a label rather than a player, such as Server for its own announcements.
+                // The relay posts under the in-game player's own name, so the name IS the speaker.
+                // Membership of the join set is deliberately not required: an export slice often
+                // starts after somebody joined, and demanding the join line left that player's chat
+                // un-attributed. Only a name that cannot be a player name at all, such as a label
+                // wrapped in brackets, falls through to server output.
                 String player = playerName(line.actor());
-                if (player != null && players.contains(key(player))) {
+                if (player != null) {
                     if (current.replayChat) {
                         events.add(new Event(line.atMillis(), Kind.CHAT, player, line.text()));
                     }

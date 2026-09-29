@@ -579,7 +579,8 @@ public final class FabricEntrypoint implements ModInitializer {
     private int status(CommandSourceStack source) {
         PlayerSnapshot snapshot = relay.snapshot();
         String age = snapshot.refreshedAt() == null ? "never" : Duration.between(snapshot.refreshedAt(), Instant.now()).toSeconds() + "s";
-        message(source, "§eReal online: §f" + server.getPlayerList().getPlayerCount());
+        message(source, "§eReal online: §f" + server.getPlayerList().getPlayerCount()
+                + " §8| §7names: §f" + realNamesText());
         message(source, "§eStatic fakes: §f" + config.statics.size() + " §8| §7names: §f" + namesText(config.statics));
         message(source, "§eRelay endpoint: §f" + relayEndpoint());
         message(source, "§eRelayed players: §f" + snapshot.players().size() + " §8| §7names: §f" + namesText(snapshot.players()));
@@ -604,6 +605,14 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private String namesText(Collection<FauxPlayerEntry> entries) {
         return entries.isEmpty() ? "(none)" : String.join(", ", entries.stream().map(FauxPlayerEntry::name).toList());
+    }
+
+    /** The real players online, shown by name so the status readout matches the fake roster lines. */
+    private String realNamesText() {
+        if (server == null) return "(none)";
+        List<String> names = server.getPlayerList().getPlayers().stream()
+                .map(player -> player.getGameProfile().name()).toList();
+        return names.isEmpty() ? "(none)" : String.join(", ", names);
     }
 
     private int add(CommandContext<CommandSourceStack> context, String requested) {

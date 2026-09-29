@@ -66,7 +66,8 @@ public final class FauxPlayersCommand implements TabExecutor {
         String age = cached.refreshedAt() == null
                 ? "never"
                 : Duration.between(cached.refreshedAt(), Instant.now()).toSeconds() + "s";
-        sender.sendMessage("§eReal online: §f" + plugin.getServer().getOnlinePlayers().size());
+        sender.sendMessage("§eReal online: §f" + plugin.getServer().getOnlinePlayers().size()
+                + " §8| §7names: §f" + realNames());
         sender.sendMessage("§eStatic fakes: §f" + plugin.config().statics.size()
                 + " §8| §7names: §f" + names(plugin.config().statics));
         sender.sendMessage("§eRelay endpoint: §f" + relayEndpoint());
@@ -95,6 +96,13 @@ public final class FauxPlayersCommand implements TabExecutor {
         }
         return plugin.config().relayHost
                 + (plugin.config().relayPort > 0 ? ":" + plugin.config().relayPort : " (SRV/default port)");
+    }
+
+    private String realNames() {
+        var players = plugin.getServer().getOnlinePlayers();
+        return players.isEmpty()
+                ? "(none)"
+                : String.join(", ", players.stream().map(Player::getName).toList());
     }
 
     private void list(CommandSender sender) {

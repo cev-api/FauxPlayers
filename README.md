@@ -401,6 +401,13 @@ The file is a Discord channel export with the columns `AuthorID`, `Author`,
 - Paper: `plugins/FauxPlayers/replay/chat.csv`.
 - Fabric: `config/fauxplayers/replay/chat.csv`.
 
+The position is saved as the replay advances, so a server restart carries on from
+where it stopped instead of starting at the first line. The saved position sits
+beside the file, as `chat.csv.position`, so changing `replay.file` starts the new
+file from the beginning. `/fauxplayers replay restart` starts over from the first
+line and clears the saved position. Switching the replay off keeps the position,
+so turning it back on resumes.
+
 ### What is replayed
 
 `X joined the game` adds the `X` fake entry and broadcasts the join message.
@@ -451,9 +458,10 @@ FauxPlayers reads the account from the `AuthorID` column:
 - The relay is an account that posts under many different names, and those names
   belong to people who joined the server. A Discord account only ever posts under
   one name, so it never qualifies.
-- A relayed line counts as in-game chat only when its name is one that joined the
-  server. A label that never joined stays server output, as with the name `Server`
-  for the server's own announcements.
+- A relayed line counts as in-game chat whenever its name is a player name, which it is by
+  construction because the relay posts under the player's own name. The name does not
+  have to appear in a join line, so a slice of an export that starts after somebody
+  joined still attributes their chat correctly.
 
 Anything left is Discord chat.
 
@@ -472,6 +480,10 @@ An in-game chat line is recognised by its `Player: message` shape, and the playe
 does not have to be one the export recorded joining. So `FieryGrowth: wsp`
 replays as chat from `FieryGrowth` even in a file that never shows them logging
 in. A name written with a leading dot, as some servers do, is trimmed.
+
+The same applies to the relay, which posts under the player's own name, so its
+lines are attributed from that name. A line whose name cannot be a player name at
+all, such as one wrapped in brackets, stays server output.
 
 In-game chat shows as `<Player> message` and Discord chat as
 `[Discord] <user> message`.
@@ -605,9 +617,9 @@ high speed settles at that rate instead of going faster.
 - The export is parsed once on startup. Change `replay.chat`,
   `replay.discord-chat`, `replay.deaths`, `replay.events`, or
   `replay.maximum-gap-seconds` and then run `/fauxplayers replay restart`.
-- A line the relay carries under the label `Server`, meaning the server speaking
-  about itself, still replays without a speaker when `replay.events` is on. Set
-  `replay.events` to `false` to drop those too.
+- A relay line labelled `Server`, meaning the server speaking about itself,
+  replays as chat from `Server`. That label is what the export calls it, and it is
+  not a real account.
 - Some servers forward their own chat to Discord and then take it back again. The
   echo is a second line with the same words, so it replays twice. The same
   happens to a death that both accounts carry.
