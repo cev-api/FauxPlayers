@@ -102,6 +102,11 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private void start(MinecraftServer minecraftServer) {
         server = minecraftServer;
+        // Keep command services available even if loading the YAML config fails.
+        // reload() recovers with an empty config in that case, but its normal path
+        // creates the tab/profile manager only after reading the file.
+        if (tab == null) tab = new FabricTabManager(server);
+        tab.warnHeadFailures(this::warn);
         messageFormat = new FabricMessageFormat(configPath.getParent().resolve("message-format.yml"), this::warn);
         messageFormat.load();
         reload();
@@ -630,17 +635,33 @@ public final class FabricEntrypoint implements ModInitializer {
     private int add(CommandContext<CommandSourceStack> context, String requested) {
         if (document.mapList("static-players").stream().anyMatch(map -> requested.equalsIgnoreCase(String.valueOf(map.get("name")))))
             return message(context, "§cThat static fake already exists.");
-        message(context, "§7Resolving Mojang profile for §f" + requested + "§7...");
-        tab.canonicalName(requested).thenAccept(canonical -> server.execute(() -> {
-            List<Map<String, Object>> list = document.mapList("static-players");
-            if (list.stream().anyMatch(map -> canonical.equalsIgnoreCase(String.valueOf(map.get("name"))))) {
-                message(context, "§cThat static fake already exists."); return;
-            }
-            Map<String, Object> entry = new java.util.LinkedHashMap<>();
-            entry.put("name", canonical); entry.put("latency", config.defaultLatency);
-            list.add(entry); document.set("static-players", list); saveAndReload();
-            fakeMessage(canonical, true); message(context, "§aAdded static fake: §f" + canonical);
-        }));
+        CommandSourceStack source = context.getSource();
+        message(source, "§7Resolving Mojang profile for §f" + requested + "§7...");
+        try {
+            tab.canonicalName(requested).whenComplete((canonical, error) -> server.execute(() -> {
+                if (error != null) {
+                    LOGGER.error("Could not resolve Mojang profile for {}", requested, error);
+                    message(source, "§cCould not resolve that profile. Check the server log for details.");
+                    return;
+                }
+                try {
+                    List<Map<String, Object>> list = document.mapList("static-players");
+                    if (list.stream().anyMatch(map -> canonical.equalsIgnoreCase(String.valueOf(map.get("name"))))) {
+                        message(source, "§cThat static fake already exists."); return;
+                    }
+                    Map<String, Object> entry = new java.util.LinkedHashMap<>();
+                    entry.put("name", canonical); entry.put("latency", config.defaultLatency);
+                    list.add(entry); document.set("static-players", list); saveAndReload();
+                    message(source, "§aAdded static fake: §f" + canonical);
+                } catch (Throwable failure) {
+                    LOGGER.error("Could not add static fake {} after profile resolution", requested, failure);
+                    message(source, "§cCould not add that fake. Check the server log for details.");
+                }
+            }));
+        } catch (Throwable error) {
+            LOGGER.error("Could not start Mojang profile lookup for {}", requested, error);
+            message(source, "§cCould not start profile lookup. Check the server log for details.");
+        }
         return 1;
     }
 
@@ -654,7 +675,6 @@ public final class FabricEntrypoint implements ModInitializer {
         });
         boolean removed = list.size() != document.mapList("static-players").size();
         document.set("static-players", list); saveAndReload();
-        if (removed) fakeMessage(canonical[0], false);
         return message(context, removed ? "§aRemoved static fake: §f" + canonical[0] : "§cNo such static fake.");
     }
 

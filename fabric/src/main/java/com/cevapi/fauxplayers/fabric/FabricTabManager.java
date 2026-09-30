@@ -24,7 +24,6 @@ import net.minecraft.world.level.GameType;
 final class FabricTabManager {
     private final MinecraftServer server;
     private final FabricProfileResolver profiles;
-    private final FabricPlayerListObjectiveBridge playerListObjective = new FabricPlayerListObjectiveBridge();
     private final Set<UUID> sent = new HashSet<>();
     private final Map<UUID, FauxPlayerEntry> entries = new HashMap<>();
     private final Map<UUID, GameProfile> profileCache = new HashMap<>();
@@ -76,9 +75,6 @@ final class FabricTabManager {
                 for (ServerPlayer viewer : server.getPlayerList().getPlayers()) sendUpdate(viewer, next);
                 retryProfile(entry, now);
             } else {
-                // Reassert scores so they also return after TAB reloads its objective.
-                for (ServerPlayer viewer : server.getPlayerList().getPlayers())
-                    playerListObjective.add(viewer, entries.get(entry.uuid()));
                 retryProfile(entry, now);
             }
         }
@@ -149,7 +145,6 @@ final class FabricTabManager {
     }
 
     private void remove(UUID id) {
-        FauxPlayerEntry old = entries.get(id);
         sent.remove(id);
         entries.remove(id);
         profileCache.remove(id);
@@ -158,7 +153,6 @@ final class FabricTabManager {
         ClientboundPlayerInfoRemovePacket packet = new ClientboundPlayerInfoRemovePacket(List.of(id));
         for (ServerPlayer viewer : server.getPlayerList().getPlayers()) {
             viewer.connection.send(packet);
-            if (old != null) playerListObjective.remove(viewer, old.name());
         }
     }
 
@@ -191,7 +185,6 @@ final class FabricTabManager {
         send(viewer, value, value, EnumSet.of(
                 ClientboundPlayerInfoUpdatePacket.Action.UPDATE_LATENCY,
                 ClientboundPlayerInfoUpdatePacket.Action.UPDATE_DISPLAY_NAME));
-        playerListObjective.update(viewer, value);
     }
 
     private void send(ServerPlayer viewer, FauxPlayerEntry logical, FauxPlayerEntry value,
@@ -207,6 +200,5 @@ final class FabricTabManager {
         ClientboundPlayerInfoUpdatePacket packet = new ClientboundPlayerInfoUpdatePacket(actions, List.of());
         ((ClientboundPlayerInfoUpdatePacketAccessorMixin) packet).fauxplayers$setEntries(List.of(entry));
         viewer.connection.send(packet);
-        playerListObjective.add(viewer, value);
     }
 }

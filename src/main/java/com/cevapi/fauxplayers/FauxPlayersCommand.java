@@ -143,7 +143,6 @@ public final class FauxPlayersCommand implements TabExecutor {
                     plugin.getConfig().set("static-players", list);
                     plugin.saveConfig();
                     plugin.reloadPlugin();
-                    plugin.fakeMessage(canonical, true);
                     sender.sendMessage("§aAdded static fake: §f" + canonical);
                 }));
     }
@@ -164,9 +163,6 @@ public final class FauxPlayersCommand implements TabExecutor {
         plugin.getConfig().set("static-players", list);
         plugin.saveConfig();
         plugin.reloadPlugin();
-        if (removed) {
-            plugin.fakeMessage(canonical, false);
-        }
         sender.sendMessage(removed
                 ? "§aRemoved static fake: §f" + canonical
                 : "§cNo such static fake.");

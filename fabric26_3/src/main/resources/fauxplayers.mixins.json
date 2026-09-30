@@ -7,8 +7,7 @@
     "ClientboundPlayerInfoUpdatePacketAccessorMixin",
     "PlayerListMixin",
     "ServerGamePacketListenerImplMixin",
-    "CommandDispatcherSuggestionMixin",
-    "CommandSuggestionMixin"
+    "CommandDispatcherSuggestionMixin"
   ],
   "injectors": {
     "defaultRequire": 1
