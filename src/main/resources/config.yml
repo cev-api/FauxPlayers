@@ -43,7 +43,7 @@ replay:
   file: replay/chat.csv
   speed: 1.0
   loop: true
-  maximum-gap-seconds: 30
+  maximum-gap-seconds: 0
   maximum-players: 100
   # In-game chat, relayed to Discord by the server's own bot account.
   chat: true

@@ -752,9 +752,10 @@ public final class ReplayManager {
     }
 
     /**
-     * Maps each accepted line onto the replay clock. The cap applies to the wait before each
-     * line and the capped waits accumulate, so a long quiet period costs at most one cap and
-     * the lines that follow it still play at their true spacing.
+     * Maps each accepted line onto the replay clock. A positive gap cap applies to the wait
+     * before each line and the capped waits accumulate, so a long quiet period costs at most
+     * one cap and the lines that follow it still play at their true spacing. A zero cap preserves
+     * the complete CSV timeline.
      */
     private static final class Clock {
         private final long gapCapMillis;

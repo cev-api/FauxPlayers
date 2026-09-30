@@ -592,19 +592,20 @@ Clock: 2h 14m of 373d 4h 0m | next line in 12s | ticks driven: 8420
 The replay is real-time by default. `replay.speed` compresses the clock: `10`
 replays ten seconds of history per real second.
 
-A long quiet period would stall the replay, so `replay.maximum-gap-seconds` caps
-the wait before any one line. The default of `30` turns a two day outage into a
-thirty second pause.
+A long quiet period can make a replay wait for a long time. By default,
+`replay.maximum-gap-seconds` is `0`, which disables the cap and preserves the
+CSV timestamps exactly. Set it to a positive number to cap the wait before any
+one line; for example, `30` turns a two day outage into a thirty second pause.
 
 The capped waits add up, so the cap only costs one pause per quiet period. Lines
 that were a second apart still replay a second apart, even straight after a
-capped outage. A low value therefore compresses every wait, and a high value
-keeps long silences intact. This is also the knob for quiet and empty stretches:
-the wait before a line while nobody is online is capped the same way.
+capped outage. A low value compresses long waits, and a high value keeps more of
+the silence. This also affects quiet and empty stretches: the wait before a line
+while nobody is online is capped the same way.
 
-Speed and the cap decide the run time together. As a reference, the sample
-export covers 373 days and replays in about 73 days at `1.0`, 17 hours at `100`,
-and under 2 hours at `1000`.
+At `1.0` with the gap cap disabled, replay time matches the CSV timeline. The
+sample export covers 373 days; at `100` it takes about 3.7 days, and at `1000`
+about 9 hours.
 
 The replay emits at most 200 lines per tick, about 4000 per second, so a very
 high speed settles at that rate instead of going faster.

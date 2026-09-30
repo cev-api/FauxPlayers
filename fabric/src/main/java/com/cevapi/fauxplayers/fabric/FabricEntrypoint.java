@@ -412,6 +412,7 @@ public final class FabricEntrypoint implements ModInitializer {
         rootBuilder.then(ctl("set")
                 .then(arg("setting", StringArgumentType.word())
                         .suggests(this::suggestSettings)
+                        .executes(context -> currentSetting(context, StringArgumentType.getString(context, "setting")))
                         .then(arg("value", StringArgumentType.greedyString())
                                 .suggests(this::suggestSettingValues)
                                 .executes(context -> set(context,
@@ -431,20 +432,23 @@ public final class FabricEntrypoint implements ModInitializer {
             return message(context, "§aRelay refresh scheduled.");
         }));
         relayBuilder.then(ctl("host")
-                .executes(context -> message(context, "§eUsage: §f/fauxplayers relay host <hostname>"))
+                .executes(context -> usageWithCurrent(context, "/fauxplayers relay host <hostname>", "relay.status.host"))
                 .then(arg("host", StringArgumentType.word())
                         .executes(context -> setRelayValue(context, "relay.status.host",
                                 StringArgumentType.getString(context, "host")))));
         relayBuilder.then(ctl("port")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers relay port <port>", "relay.status.port"))
                 .then(arg("port", IntegerArgumentType.integer(-1))
                         .executes(context -> setRelayValue(context, "relay.status.port",
                                 IntegerArgumentType.getInteger(context, "port")))));
         relayBuilder.then(ctl("source")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers relay source <STATUS|HTTP>", "relay.source"))
                 .then(arg("source", StringArgumentType.word())
                         .suggests((context, builder) -> suggest(builder, List.of("STATUS", "HTTP")))
                         .executes(context -> setRelayValue(context, "relay.source",
                                 StringArgumentType.getString(context, "source")))));
         relayBuilder.then(ctl("refresh-seconds")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers relay refresh-seconds <seconds>", "relay.refresh-seconds"))
                 .then(arg("seconds", IntegerArgumentType.integer(1))
                         .executes(context -> setRelayValue(context, "relay.refresh-seconds",
                                 IntegerArgumentType.getInteger(context, "seconds")))));
@@ -486,39 +490,47 @@ public final class FabricEntrypoint implements ModInitializer {
         replayBuilder.then(ctl("replacements")
                 .executes(context -> replacements(context.getSource())));
         replayBuilder.then(ctl("file")
-                .executes(context -> message(context, "§eUsage: §f/fauxplayers replay file <path>"))
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay file <path>", "replay.file"))
                 .then(arg("path", StringArgumentType.greedyString())
                         .executes(context -> setValue(context, "replay.file",
                                 StringArgumentType.getString(context, "path")))));
         replayBuilder.then(ctl("speed")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay speed <multiplier>", "replay.speed"))
                 .then(arg("multiplier", DoubleArgumentType.doubleArg(0.01))
                         .executes(context -> setValue(context, "replay.speed",
                                 DoubleArgumentType.getDouble(context, "multiplier")))));
         replayBuilder.then(ctl("loop")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay loop <true|false>", "replay.loop"))
                 .then(arg("value", BoolArgumentType.bool())
                         .executes(context -> setValue(context, "replay.loop",
                                 BoolArgumentType.getBool(context, "value")))));
         replayBuilder.then(ctl("chat")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay chat <true|false>", "replay.chat"))
                 .then(arg("value", BoolArgumentType.bool())
                         .executes(context -> setValue(context, "replay.chat",
                                 BoolArgumentType.getBool(context, "value")))));
         replayBuilder.then(ctl("discord-chat")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay discord-chat <true|false>", "replay.discord-chat"))
                 .then(arg("value", BoolArgumentType.bool())
                         .executes(context -> setValue(context, "replay.discord-chat",
                                 BoolArgumentType.getBool(context, "value")))));
         replayBuilder.then(ctl("deaths")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay deaths <true|false>", "replay.deaths"))
                 .then(arg("value", BoolArgumentType.bool())
                         .executes(context -> setValue(context, "replay.deaths",
                                 BoolArgumentType.getBool(context, "value")))));
         replayBuilder.then(ctl("events")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay events <true|false>", "replay.events"))
                 .then(arg("value", BoolArgumentType.bool())
                         .executes(context -> setValue(context, "replay.events",
                                 BoolArgumentType.getBool(context, "value")))));
         replayBuilder.then(ctl("maximum-gap-seconds")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay maximum-gap-seconds <number>", "replay.maximum-gap-seconds"))
                 .then(arg("seconds", IntegerArgumentType.integer(0))
                         .executes(context -> setValue(context, "replay.maximum-gap-seconds",
                                 IntegerArgumentType.getInteger(context, "seconds")))));
         replayBuilder.then(ctl("maximum-players")
+                .executes(context -> usageWithCurrent(context, "/fauxplayers replay maximum-players <number>", "replay.maximum-players"))
                 .then(arg("players", IntegerArgumentType.integer(0))
                         .executes(context -> setValue(context, "replay.maximum-players",
                                 IntegerArgumentType.getInteger(context, "players")))));
@@ -674,6 +686,17 @@ public final class FabricEntrypoint implements ModInitializer {
         Object old = document.get(setting); Object parsed = parse(value, old);
         if (parsed == null) return message(context, "§cInvalid value for " + setting + ".");
         return setValue(context, setting, parsed);
+    }
+
+    private int currentSetting(CommandContext<CommandSourceStack> context, String setting) {
+        if (!CommandCatalog.SETTINGS.contains(setting)) return message(context, "§cUnknown setting.");
+        return message(context, "§e" + setting + " §8= §f" + document.get(setting)
+                + " §7(current value; provide a new value to change it)");
+    }
+
+    private int usageWithCurrent(CommandContext<CommandSourceStack> context, String usage, String key) {
+        message(context, "§eUsage: §f" + usage);
+        return message(context, "§7Current §f" + key + " §8= §f" + document.get(key));
     }
 
     private int setValue(CommandContext<CommandSourceStack> context, String setting, Object value) {

@@ -93,7 +93,7 @@ public final class PluginConfig {
         replayFile = source.text("replay.file", "replay/chat.csv");
         replaySpeed = Math.max(0.01, source.decimal("replay.speed", 1.0));
         replayLoop = source.bool("replay.loop", true);
-        replayMaximumGapSeconds = Math.max(0, source.integer("replay.maximum-gap-seconds", 30));
+        replayMaximumGapSeconds = Math.max(0, source.integer("replay.maximum-gap-seconds", 0));
         replayMaximumPlayers = Math.max(0, source.integer("replay.maximum-players", 100));
         replayChat = source.bool("replay.chat", true);
         replayDiscordChat = source.bool("replay.discord-chat", true);

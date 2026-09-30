@@ -308,20 +308,21 @@ public final class FauxPlayersCommand implements TabExecutor {
                 sender.sendMessage("§aReplay restarted from the first line.");
             }
             case "file" -> {
-                if (args.length < 3) sender.sendMessage("§eUsage: §f/fauxplayers replay file <path>");
+                if (args.length < 3) usageWithCurrent(sender, "/fauxplayers replay file <path>", "replay.file");
                 else updateReplay(sender, "replay.file", String.join(" ", Arrays.copyOfRange(args, 2, args.length)));
             }
             case "speed" -> {
                 Double speed = args.length < 3 ? null : decimal(args[2]);
                 if (speed == null || speed < 0.01) {
-                    sender.sendMessage("§eUsage: §f/fauxplayers replay speed <multiplier>");
+                    usageWithCurrent(sender, "/fauxplayers replay speed <multiplier>", "replay.speed");
                 } else {
                     updateReplay(sender, "replay.speed", speed);
                 }
             }
             case "loop", "chat", "discord-chat", "deaths", "events" -> {
                 Boolean value = args.length < 3 ? null : flag(args[2]);
-                if (value == null) sender.sendMessage("§eUsage: §f/fauxplayers replay " + option + " <true|false>");
+                if (value == null) usageWithCurrent(sender,
+                        "/fauxplayers replay " + option + " <true|false>", "replay." + option);
                 else updateReplay(sender, "replay." + option, value);
             }
             case "seek" -> {
@@ -368,7 +369,7 @@ public final class FauxPlayersCommand implements TabExecutor {
             case "maximum-gap-seconds", "maximum-players" -> {
                 Integer value = args.length < 3 ? null : integer(args[2]);
                 if (value == null || value < 0) {
-                    sender.sendMessage("§eUsage: §f/fauxplayers replay " + option + " <number>");
+                    usageWithCurrent(sender, "/fauxplayers replay " + option + " <number>", "replay." + option);
                 } else {
                     updateReplay(sender, "replay." + option, value);
                 }
@@ -474,6 +475,11 @@ public final class FauxPlayersCommand implements TabExecutor {
         sender.sendMessage("§aSet §f" + key + " §a= §f" + value);
     }
 
+    private void usageWithCurrent(CommandSender sender, String usage, String key) {
+        sender.sendMessage("§eUsage: §f" + usage);
+        sender.sendMessage("§7Current §f" + key + " §8= §f" + plugin.getConfig().get(key));
+    }
+
     private void relay(CommandSender sender, String[] args) {
         if (args.length == 1) {
             sender.sendMessage("§bRelay §8» §7enabled=§f" + plugin.config().relayEnabled
@@ -494,14 +500,14 @@ public final class FauxPlayersCommand implements TabExecutor {
             }
             case "host" -> {
                 if (args.length < 3) {
-                    sender.sendMessage("§eUsage: §f/fauxplayers relay host <hostname>");
+                    usageWithCurrent(sender, "/fauxplayers relay host <hostname>", "relay.status.host");
                 } else {
                     updateRelay(sender, "relay.status.host", args[2]);
                 }
             }
             case "port" -> {
                 if (args.length < 3) {
-                    sender.sendMessage("§eUsage: §f/fauxplayers relay port <port>");
+                    usageWithCurrent(sender, "/fauxplayers relay port <port>", "relay.status.port");
                 } else {
                     Integer port = integer(args[2]);
                     if (port == null || port < -1 || port > 65535) {
@@ -513,7 +519,7 @@ public final class FauxPlayersCommand implements TabExecutor {
             }
             case "source" -> {
                 if (args.length < 3) {
-                    sender.sendMessage("§eUsage: §f/fauxplayers relay source <STATUS|HTTP>");
+                    usageWithCurrent(sender, "/fauxplayers relay source <STATUS|HTTP>", "relay.source");
                 } else {
                     String source = args[2].toUpperCase(Locale.ROOT);
                     if (!List.of("STATUS", "HTTP").contains(source)) {
@@ -525,7 +531,7 @@ public final class FauxPlayersCommand implements TabExecutor {
             }
             case "refresh-seconds" -> {
                 if (args.length < 3) {
-                    sender.sendMessage("§eUsage: §f/fauxplayers relay refresh-seconds <seconds>");
+                    usageWithCurrent(sender, "/fauxplayers relay refresh-seconds <seconds>", "relay.refresh-seconds");
                 } else {
                     Integer seconds = integer(args[2]);
                     if (seconds == null || seconds < 1) {
