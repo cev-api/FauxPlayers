@@ -7,11 +7,16 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.profile.PlayerProfile;
 
-/** Sends presentation-only player-info packets and real Mojang skin properties. */
+/** Sends presentation-only player-info packets and optional Mojang skin properties. */
 public final class TabListManager {
     private final JavaPlugin plugin;
     private final ProfileResolver profiles;
     private final Set<UUID> sent = new HashSet<>();
+    /**
+     * Packet identity is always the stable FauxPlayers identity. Mojang profiles are used only
+     * as a source of canonical casing and texture properties; their UUID must never be exposed
+     * in a presentation-only player-info packet.
+     */
     private final Map<UUID, UUID> packetIds = new HashMap<>();
     private final Map<UUID, ResolvedState> states = new HashMap<>();
     private final Map<UUID, Long> generations = new HashMap<>();
@@ -91,13 +96,11 @@ public final class TabListManager {
     private void reinstall(UUID logicalId,PlayerProfile profile,ProfileResolver.TextureProperty texture){
         ResolvedState current=states.get(logicalId);
         if(current==null)return;
-        boolean changed=profile!=null&&!profile.getUniqueId().equals(current.entry().uuid());
-        if(!changed&&(texture==null||current.texture()!=null))return;
+        if(texture==null&&current.texture()!=null)return;
         FauxPlayerEntry entry=profile==null?current.entry()
-                :new FauxPlayerEntry(profile.getName(),profile.getUniqueId(),current.entry().displayName(),
+                :new FauxPlayerEntry(profile.getName(),current.entry().uuid(),current.entry().displayName(),
                         current.entry().latency(),current.entry().gameMode(),current.entry().remote());
         UUID packetId=packetIds.getOrDefault(logicalId,logicalId);
-        if(changed)packetIds.put(logicalId,entry.uuid());
         states.put(logicalId,new ResolvedState(entry,profile,texture));
         for(Player viewer:Bukkit.getOnlinePlayers())try{
             backend.remove(viewer,packetId);
@@ -161,8 +164,11 @@ public final class TabListManager {
                 PlayerProfile profile=(PlayerProfile)result[0];
                 String canonical=(String)result[1];
                 ProfileResolver.TextureProperty texture=(ProfileResolver.TextureProperty)result[2];
-                FauxPlayerEntry resolved=profile==null?entry:new FauxPlayerEntry(canonical,profile.getUniqueId(),entry.displayName(),entry.latency(),entry.gameMode(),entry.remote());
-                packetIds.put(entry.uuid(),resolved.uuid());
+                // Keep the generated FauxPlayers UUID. The Mojang profile supplies casing and
+                // texture data only; exposing its UUID makes other identity tooling treat this
+                // presentation-only entry as a real account.
+                FauxPlayerEntry resolved=profile==null?entry:new FauxPlayerEntry(canonical,entry.uuid(),entry.displayName(),entry.latency(),entry.gameMode(),entry.remote());
+                packetIds.put(entry.uuid(),entry.uuid());
                 states.put(entry.uuid(),new ResolvedState(resolved,profile,texture));
                 backend.add(viewer,resolved,profile,texture);if(plugin instanceof FauxPlayersPlugin faux&&faux.playerListObjective()!=null)faux.playerListObjective().add(viewer,resolved);
             } catch(Exception ex){plugin.getLogger().log(java.util.logging.Level.WARNING,"Unable to send fake TAB entry",ex);}
