@@ -8,6 +8,7 @@ version = rootProject.version
 
 dependencies {
     implementation("org.yaml:snakeyaml:2.6")
+    implementation("com.google.code.gson:gson:2.13.1")
 }
 
 java {

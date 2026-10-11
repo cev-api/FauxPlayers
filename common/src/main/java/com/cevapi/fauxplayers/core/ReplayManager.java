@@ -324,6 +324,23 @@ public final class ReplayManager {
         return events == null ? 0 : events.size();
     }
 
+    public long chatEventCount() { return count(Kind.CHAT); }
+    public long discordEventCount() { return count(Kind.DISCORD); }
+
+    public synchronized long nextChatInMillis() {
+        List<Event> events = timeline;
+        if (events == null) return -1L;
+        for (int index = cursor; index < events.size(); index++) {
+            if (events.get(index).kind() == Kind.CHAT) return Math.max(0L, events.get(index).atMillis() - virtualMillis);
+        }
+        return -1L;
+    }
+
+    private long count(Kind kind) {
+        List<Event> events = timeline;
+        return events == null ? 0L : events.stream().filter(event -> event.kind() == kind).count();
+    }
+
     public synchronized int position() {
         return cursor;
     }

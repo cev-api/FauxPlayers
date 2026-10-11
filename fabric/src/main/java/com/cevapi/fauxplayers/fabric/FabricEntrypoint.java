@@ -5,6 +5,8 @@ import com.cevapi.fauxplayers.core.CommandCatalog;
 import com.cevapi.fauxplayers.core.PlayerSnapshot;
 import com.cevapi.fauxplayers.core.PluginConfig;
 import com.cevapi.fauxplayers.core.PresentationMath;
+import com.cevapi.fauxplayers.core.PersonaChatManager;
+import com.cevapi.fauxplayers.core.FauxDeathSimulator;
 import com.cevapi.fauxplayers.core.RelayManager;
 import com.cevapi.fauxplayers.core.ReplayManager;
 import com.cevapi.fauxplayers.core.YamlConfig;
@@ -40,6 +42,7 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
@@ -60,6 +63,9 @@ public final class FabricEntrypoint implements ModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("FauxPlayers");
     private final Path configPath = FabricLoader.getInstance().getConfigDir()
             .resolve("fauxplayers").resolve("config.yml");
+    private final PersonaChatManager personaChat = new PersonaChatManager();
+    private final FauxDeathSimulator deathSimulator = new FauxDeathSimulator();
+    private String personaSystemPrompt = "";
     private MinecraftServer server;
     private YamlConfig document;
     private PluginConfig config;
@@ -73,6 +79,7 @@ public final class FabricEntrypoint implements ModInitializer {
     private int tickFailures;
     private Instant announcedRemoteRefresh;
     private long tick;
+    private long nextPersonaAtMillis;
 
     public FabricEntrypoint() {
         instance = this;
@@ -88,14 +95,20 @@ public final class FabricEntrypoint implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(this::start);
         ServerLifecycleEvents.SERVER_STOPPING.register(this::stop);
         ServerTickEvents.END_SERVER_TICK.register(this::tick);
+        ServerMessageEvents.CHAT_MESSAGE.register((message, player, params) -> {
+            if (player.level().getServer() == server) handlePersonaInput(player.getGameProfile().name(), message.signedContent());
+        });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, minecraftServer) -> {
-            if (minecraftServer == server) sendTo(handler.getPlayer());
+            if (minecraftServer == server) { sendTo(handler.getPlayer()); server.execute(this::updatePersonaLifecycle); }
             ServerPlayer joinedPlayer = handler.getPlayer();
             log("Player " + joinedPlayer.getGameProfile().name()
                     + " joined; FauxPlayers command visibility: "
                     + (admin(joinedPlayer.createCommandSourceStack())
                             ? "visible (operator, level 2+)"
                             : "hidden (non-operator)"));
+        });
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, minecraftServer) -> {
+            if (minecraftServer == server) server.execute(this::updatePersonaLifecycle);
         });
         CommandRegistrationCallback.EVENT.register(this::registerCommands);
     }
@@ -134,6 +147,11 @@ public final class FabricEntrypoint implements ModInitializer {
             // A failure here must not stop the replay from being driven again on the next tick.
             try {
                 if (replay != null) replay.tick();
+                if (personaSessionActive() && System.currentTimeMillis() >= nextPersonaAtMillis) { scheduleNextPersona(); requestPersonaConversation(); }
+                if (config.simulatedDeathsEnabled && !config.replayEnabled) {
+                    String death = deathSimulator.tick(250L, tabEntries());
+                    if (death != null) server.getPlayerList().broadcastSystemMessage(Component.literal(death), false);
+                }
                 tab.sync(config, tabEntries());
                 announceRemoteChanges();
             } catch (Throwable error) {
@@ -168,6 +186,11 @@ public final class FabricEntrypoint implements ModInitializer {
             }
             document = YamlConfig.load(configPath);
             config = PluginConfig.load(document);
+            loadPersonaPrompt();
+            updatePersonaLifecycle();
+            log("Persona chat " + (config.llmEnabled ? "enabled" : "disabled") + "; model=" + config.llmModel
+                    + ", API key=" + (config.llmApiKey.isBlank() ? "not configured" : "configured (hidden)")
+                    + ", files=" + personaPath(config.personaPromptFile) + " and " + personaPath(config.personaDataFile));
             if (relay == null) {
                 relay = new RelayManager(new RelayManager.Host() {
                     @Override public void fine(String message) { log(message); }
@@ -304,6 +327,71 @@ public final class FabricEntrypoint implements ModInitializer {
                 relaySnapshot(), replayEntries()), onlineRealNames());
     }
 
+    private Path personaPath(String value) { Path path = Path.of(value); return path.isAbsolute() ? path : configPath.getParent().resolve(path); }
+    private boolean personaSessionActive() { return config != null && config.llmEnabled && (config.llmMode.equals("ALWAYS") || server != null && server.getPlayerList().getPlayerCount() > 0); }
+    private long randomPersonaDelay(long min, long max) { return java.util.concurrent.ThreadLocalRandom.current().nextLong(min, max + 1); }
+    private void updatePersonaLifecycle() {
+        if (config == null || !config.llmEnabled) { if (nextPersonaAtMillis != 0) personaChat.clearHistory(); nextPersonaAtMillis = 0; return; }
+        if (config.llmMode.equals("JOINED") && (server == null || server.getPlayerList().getPlayerCount() == 0)) {
+            if (nextPersonaAtMillis != 0) personaChat.clearHistory(); nextPersonaAtMillis = 0; return;
+        }
+        if (nextPersonaAtMillis == 0) { nextPersonaAtMillis = System.currentTimeMillis() + randomPersonaDelay(8, 18) * 1000L; log("Persona chat session started (mode=" + config.llmMode + ")."); }
+    }
+    private void scheduleNextPersona() { long min = config.personaIntervalMinimumSeconds, max = config.personaIntervalMaximumSeconds; nextPersonaAtMillis = System.currentTimeMillis() + randomPersonaDelay(min, max) * 1000L; }
+    private void requestPersonaConversation() {
+        List<String> names = tabEntries().stream().map(FauxPlayerEntry::name).limit(10).toList();
+        if (names.size() < 2) { log("Persona conversation skipped: fewer than two active faux players."); return; }
+        boolean started = personaChat.requestConversation(config.llmEndpoint, config.llmApiKey, config.llmModel, personaSystemPrompt, names,
+                lines -> server.execute(() -> { if (!personaSessionActive()) { personaChat.clearHistory(); return; } log("Persona conversation completed with " + lines.size() + " line(s)."); for (var line : lines) sayFaux(line.name(), line.message()); }),
+                error -> warn("Persona conversation failed: " + error.getMessage()));
+        if (started) log("Persona conversation request started for " + names.size() + " active faux players.");
+    }
+
+    private void loadPersonaPrompt() {
+        try {
+            Path path = Path.of(config.personaPromptFile);
+            if (!path.isAbsolute()) path = configPath.getParent().resolve(path);
+            String prompt = readPersonaFile(path, "/minecraft_chat_personas_system_prompt.md");
+            personaSystemPrompt = prompt + "\n\nStructured persona roster:\n"
+                    + readPersonaData(config.personaDataFile);
+        } catch (Exception error) {
+            personaSystemPrompt = "Generate short natural Minecraft group chat.";
+            warn("Could not load persona prompt: " + error.getMessage());
+        }
+    }
+
+    private String readPersonaData(String configured) throws IOException {
+        Path path = Path.of(configured);
+        if (!path.isAbsolute()) path = configPath.getParent().resolve(path);
+        return readPersonaFile(path, "/minecraft_chat_personas.json");
+    }
+
+    private String readPersonaFile(Path path, String resource) throws IOException {
+        if (Files.exists(path)) {
+            String previous = Files.readString(path);
+            if (!previous.contains("automated nature must be disclosed")
+                    && !previous.contains("live_mode_disclosure")) return previous;
+        }
+        try (var input = FabricEntrypoint.class.getResourceAsStream(resource)) {
+            if (input == null) throw new IOException("missing persona resource " + resource);
+            Files.createDirectories(path.getParent());
+            Files.copy(input, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        return Files.readString(path);
+    }
+
+    private void handlePersonaInput(String speaker, String text) {
+        if (config == null || !config.llmEnabled || text == null || text.isBlank()) return;
+        if (!personaSessionActive()) return;
+        personaChat.recordPlayerMessage(speaker, text);
+        nextPersonaAtMillis = System.currentTimeMillis() + randomPersonaDelay(8, 18) * 1000L;
+    }
+
+    private void sayFaux(String name, String message) {
+        FauxPlayerEntry entry = tabEntries().stream().filter(value -> value.name().equalsIgnoreCase(name)).findFirst().orElse(null);
+        if (entry != null) server.getPlayerList().broadcastSystemMessage(colored("§7<" + entry.name() + "> §f" + message), false);
+    }
+
     /** Names of the real players online, so a fake entry never duplicates one of them. */
     private Set<String> onlineRealNames() {
         Set<String> names = new LinkedHashSet<>();
@@ -410,6 +498,13 @@ public final class FabricEntrypoint implements ModInitializer {
                                 .executes(context -> ping(context,
                                         StringArgumentType.getString(context, "name"),
                                         IntegerArgumentType.getInteger(context, "milliseconds"))))));
+        rootBuilder.then(ctl("outlierping")
+                .then(arg("count", IntegerArgumentType.integer(0))
+                        .executes(context -> outlierPing(context, IntegerArgumentType.getInteger(context, "count"))))
+                .then(ctl("set").then(arg("range", StringArgumentType.word()).executes(context -> setPingRange(context, "tab.outlier-ping.minimum", "tab.outlier-ping.maximum", StringArgumentType.getString(context, "range"))))));
+        rootBuilder.then(ctl("pingrange").then(ctl("set").then(arg("range", StringArgumentType.word()).executes(context -> setPingRange(context, "tab.random-ping.minimum", "tab.random-ping.maximum", StringArgumentType.getString(context, "range"))))));
+        rootBuilder.then(ctl("defaultping").then(ctl("set").then(arg("range", StringArgumentType.word()).executes(context -> setPingRange(context, "tab.default-latency-range.minimum", "tab.default-latency-range.maximum", StringArgumentType.getString(context, "range"))))));
+        rootBuilder.then(ctl("personas").then(ctl("status").executes(context -> status(context.getSource()))));
         rootBuilder.then(ctl("get")
                 .then(arg("setting", StringArgumentType.word())
                         .suggests(this::suggestSettings)
@@ -589,6 +684,10 @@ public final class FabricEntrypoint implements ModInitializer {
         message(source, "§f/fauxplayers §bremove <name> §8- §7Remove a static fake");
         message(source, "§f/fauxplayers §bsay <name> <message> §8- §7Broadcast fake chat");
         message(source, "§f/fauxplayers §bget/set <setting> §8- §7Inspect or change settings");
+        message(source, "§f/fauxplayers §boutlierping <count> §8- §7Choose random high-ping faux players");
+        message(source, "§f/fauxplayers §boutlierping set <min>-<max> §8- §7Set outlier ping range");
+        message(source, "§f/fauxplayers §bpingrange/defaultping set <min>-<max> §8- §7Set random/default ping ranges");
+        message(source, "§f/fauxplayers §bpersonas status §8- §7Show persona chat status");
         message(source, "§f/fauxplayers §brelay <enable|disable|host|port|source|refresh> ...");
         return message(source, "§f/fauxplayers §breplay <" + CommandCatalog.replayUsage() + "> ...");
     }
@@ -605,7 +704,22 @@ public final class FabricEntrypoint implements ModInitializer {
         message(source, "§eSource: §f" + config.relaySource + " §8| §7enabled: §f" + config.relayEnabled + " §8| §7cache age: §f" + age);
         message(source, "§eReplay: §f" + config.replayEnabled + " §8| §7lines: §f"
                 + (replay == null ? 0 : replay.position()) + "§7/§f" + (replay == null ? 0 : replay.eventCount())
-                + " §8| §7players: §f" + (replay == null ? 0 : replay.playerCount()));
+                + " §8| §7players: §f" + (replay == null ? 0 : replay.playerCount())
+                + " §8| §7chat: §f" + config.replayChat + " §7Discord: §f" + config.replayDiscordChat
+                + " §7deaths/events: §f" + config.replayDeaths + "/" + config.replayEvents
+                + " §7speed: §f" + config.replaySpeed + " §7max gap: §f" + config.replayMaximumGapSeconds + "s"
+                + " §7next: §f" + (replay == null || replay.nextDueInMillis() < 0 ? "(none)" : seconds(replay.nextDueInMillis())));
+        message(source, "§eReplay chat events: §f" + (replay == null ? 0 : replay.chatEventCount()) + " §8| §7next in-game chat: §f"
+                + (replay == null || replay.nextChatInMillis() < 0 ? "(none remaining)" : seconds(replay.nextChatInMillis()))
+                + " §8| §7Discord messages: §f" + (replay == null ? 0 : replay.discordEventCount()));
+        message(source, "§ePings: §frandom=" + config.randomPing + " (" + config.pingMinimum + "–" + config.pingMaximum
+                + "ms), default=" + config.defaultLatencyMinimum + "–" + config.defaultLatencyMaximum + "ms, outliers="
+                + tab.activeOutlierPingCount() + "/" + config.outlierPingCount + " (" + config.outlierPingMinimum + "–" + config.outlierPingMaximum + "ms)");
+        var persona = personaChat.status();
+        message(source, "§ePersonas: §f" + config.llmEnabled + " §8| §7model: §f" + config.llmModel + " §8| §7endpoint: §f" + config.llmEndpoint + " §8| §7API key: §f" + (config.llmApiKey.isBlank() ? "not set" : "configured (hidden)"));
+        message(source, "§ePersona mode: §f" + config.llmMode + " §8| §7active: §f" + personaSessionActive() + " §8| §7real players: §f" + server.getPlayerList().getPlayerCount());
+        message(source, "§ePersona chat: §f" + tabEntries().size() + " participants §8| §7interval: §f" + config.personaIntervalMinimumSeconds + "–" + config.personaIntervalMaximumSeconds + "s §8| §7requests: §f" + persona.requests() + " §8| §7in flight: §f" + persona.inFlight() + " §8| §7last: §f" + (persona.lastError() == null ? persona.lastMessageCount() + " line(s)" : persona.lastError()));
+        message(source, "§eSimulated deaths: §f" + config.simulatedDeathsEnabled + " §8| §7replay: §f" + config.replayEnabled);
         return message(source, "§eLast error: §f" + (relay.lastError() == null ? "none" : relay.lastError()));
     }
 
@@ -696,9 +810,24 @@ public final class FabricEntrypoint implements ModInitializer {
         return message(context, "§aSet fake ping for §f" + name + " §ato §f" + milliseconds + "ms§a.");
     }
 
+    private int outlierPing(CommandContext<CommandSourceStack> context, int count) {
+        document.set("tab.outlier-ping.count", count);
+        saveAndReload();
+        int selected = tab.outlierPingCount(count, tabEntries());
+        return message(context, "§aOutlier pings applied to §f" + selected
+                + " §afaux players at " + config.outlierPingMinimum + "–" + config.outlierPingMaximum + "ms. §7Use 0 to disable.");
+    }
+
+    private int setPingRange(CommandContext<CommandSourceStack> context, String minKey, String maxKey, String raw) {
+        try { String[] parts = raw.split("-", -1); if (parts.length != 2) throw new NumberFormatException(); int min = Integer.parseInt(parts[0]), max = Integer.parseInt(parts[1]); if (min < 0 || max < min || max > 100000) throw new NumberFormatException(); document.set(minKey, min); document.set(maxKey, max); saveAndReload(); tab.refreshPings(); return message(context, "§aSet ping range to §f" + min + "–" + max + "ms§a."); }
+        catch (NumberFormatException error) { return message(context, "§cUse a valid non-negative range, for example 300-1500."); }
+    }
+
+    private String settingValue(String key) { return key.equals("personas.api-key") ? (String.valueOf(document.get(key)).isBlank() ? "(not set)" : "(configured; hidden)") : String.valueOf(document.get(key)); }
+
     private int get(CommandContext<CommandSourceStack> context, String setting) {
         if (!CommandCatalog.SETTINGS.contains(setting)) return message(context, "§cUnknown setting. §7Use /fauxplayers get for the list.");
-        return message(context, "§e" + setting + " §8= §f" + document.get(setting));
+        return message(context, "§e" + setting + " §8= §f" + settingValue(setting));
     }
 
     private int set(CommandContext<CommandSourceStack> context, String setting, String value) {
@@ -710,7 +839,7 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private int currentSetting(CommandContext<CommandSourceStack> context, String setting) {
         if (!CommandCatalog.SETTINGS.contains(setting)) return message(context, "§cUnknown setting.");
-        return message(context, "§e" + setting + " §8= §f" + document.get(setting)
+        return message(context, "§e" + setting + " §8= §f" + settingValue(setting)
                 + " §7(current value; provide a new value to change it)");
     }
 
@@ -721,7 +850,7 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private int setValue(CommandContext<CommandSourceStack> context, String setting, Object value) {
         document.set(setting, value); saveAndReload();
-        return message(context, "§aSet §f" + setting + " §a= §f" + value);
+        return message(context, "§aSet §f" + setting + " §a= §f" + (setting.equals("personas.api-key") ? "(configured; hidden)" : value));
     }
 
     private int setRelayValue(CommandContext<CommandSourceStack> context, String setting, Object value) {
@@ -838,10 +967,16 @@ public final class FabricEntrypoint implements ModInitializer {
 
     private int replay(CommandSourceStack source) {
         message(source, "§bReplay §8» §7enabled=§f" + config.replayEnabled + " §8| §7file=§f" + config.replayFile
-                + " §8| §7speed=§f" + config.replaySpeed + " §8| §7loop=§f" + config.replayLoop);
+                + " §8| §7speed=§f" + config.replaySpeed + " §8| §7loop=§f" + config.replayLoop
+                + " §8| §7chat=§f" + config.replayChat + " §8| §7discord-chat=§f" + config.replayDiscordChat
+                + " §8| §7deaths/events=§f" + config.replayDeaths + "/" + config.replayEvents
+                + " §8| §7max-gap=§f" + config.replayMaximumGapSeconds + "s");
         if (replay == null) return message(source, "§7No replay timeline is loaded yet.");
         message(source, "§7Lines: §f" + replay.position() + "§7/§f" + replay.eventCount()
                 + " §8| §7players: §f" + replay.playerCount() + " §8| §7finished: §f" + replay.finished());
+        message(source, "§7Chat events: §f" + replay.chatEventCount() + " §8| §7next in-game chat: §f"
+                + (replay.nextChatInMillis() < 0 ? "(none remaining)" : seconds(replay.nextChatInMillis()))
+                + " §8| §7Discord messages: §f" + replay.discordEventCount());
         message(source, "§7Clock: §f" + span(replay.clockMillis()) + "§7 of §f" + span(replay.timelineMillis())
                 + " §8| §7next line in §f" + (replay.nextDueInMillis() < 0 ? "(none)" : seconds(replay.nextDueInMillis()))
                 + " §8| §7ticks driven: §f" + replay.ticks());

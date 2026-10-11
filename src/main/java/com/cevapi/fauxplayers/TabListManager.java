@@ -27,6 +27,9 @@ public final class TabListManager {
     private static final long MISSING_RETRY_MILLIS = 600_000L;
     private PluginConfig currentConfig;
     private final Map<UUID, Long> nextPingUpdateMillis = new HashMap<>();
+    private final Set<UUID> outlierPings = new HashSet<>();
+    private int outlierPingCount;
+    private int appliedOutlierSetting = Integer.MIN_VALUE;
     private final NmsBackend backend;
 
     public TabListManager(JavaPlugin plugin) {
@@ -34,6 +37,16 @@ public final class TabListManager {
         if (backend==null) plugin.getLogger().warning("No compatible player-info packet backend was found; fake TAB entries are disabled.");
     }
     public boolean available(){return backend!=null;}
+    public int outlierPingCount(int count, Collection<FauxPlayerEntry> displayed){
+        outlierPingCount=Math.max(0,count);outlierPings.clear();
+        List<FauxPlayerEntry> candidates=new ArrayList<>(displayed);Collections.shuffle(candidates);
+        candidates.stream().limit(outlierPingCount).forEach(entry->outlierPings.add(entry.uuid()));
+        outlierPingCount=outlierPings.size();
+        for(UUID id:new ArrayList<>(states.keySet()))updatePing(id,null);
+        return outlierPingCount;
+    }
+    public int activeOutlierPingCount(){return outlierPings.size();}
+    public void refreshPings(){for(UUID id:new ArrayList<>(states.keySet()))updatePing(id,null);}
     public java.util.concurrent.CompletableFuture<String> canonicalName(String name){return profiles.canonicalName(name);}
 
     public void sync(PluginConfig config, Collection<FauxPlayerEntry> entries) {
@@ -42,6 +55,11 @@ public final class TabListManager {
         Set<UUID> wanted=new HashSet<>();
         for(FauxPlayerEntry e:entries)wanted.add(e.uuid());
         for(UUID id:new ArrayList<>(sent))if(!wanted.contains(id))remove(id);
+        int targetOutliers=Math.min(config.outlierPingCount,entries.size());
+        boolean staleOutlier=outlierPings.stream().anyMatch(id->!wanted.contains(id));
+        if(appliedOutlierSetting!=config.outlierPingCount||staleOutlier||outlierPings.size()<targetOutliers){
+            outlierPingCount(config.outlierPingCount,entries);appliedOutlierSetting=config.outlierPingCount;
+        }
         long now=System.currentTimeMillis();
         for(FauxPlayerEntry e:entries){
             if(sent.add(e.uuid())){
@@ -128,6 +146,8 @@ public final class TabListManager {
             backend.updateLatency(viewer,state.entry,state.profile,state.texture);if(plugin instanceof FauxPlayersPlugin faux&&faux.playerListObjective()!=null)faux.playerListObjective().update(viewer,state.entry);
         }catch(Exception ex){plugin.getLogger().fine("Unable to reassert fake TAB ping: "+ex.getClass().getSimpleName());}
     }    private FauxPlayerEntry effective(FauxPlayerEntry e){
+        if(outlierPings.contains(e.uuid()))return new FauxPlayerEntry(e.name(),e.uuid(),e.displayName(),
+                PluginConfig.gaussian(currentConfig.outlierPingMinimum,currentConfig.outlierPingMaximum),e.gameMode(),e.remote());
         if(currentConfig==null||!currentConfig.randomPing)return e;
         int min=Math.max(0,currentConfig.pingMinimum),max=Math.max(min,currentConfig.pingMaximum);
         if(max==min)return new FauxPlayerEntry(e.name(),e.uuid(),e.displayName(),min,e.gameMode(),e.remote());
@@ -181,11 +201,11 @@ public final class TabListManager {
             backend.remove(p,packetId);
             if(old!=null&&plugin instanceof FauxPlayersPlugin faux&&faux.playerListObjective()!=null)faux.playerListObjective().remove(p,old.entry.name());
         }catch(Exception ex){plugin.getLogger().log(java.util.logging.Level.WARNING,"Unable to remove fake TAB entry",ex);}
-        packetIds.remove(logicalId);states.remove(logicalId);sent.remove(logicalId);nextPingUpdateMillis.remove(logicalId);skinRetryAtMillis.remove(logicalId);
+        packetIds.remove(logicalId);states.remove(logicalId);sent.remove(logicalId);outlierPings.remove(logicalId);nextPingUpdateMillis.remove(logicalId);skinRetryAtMillis.remove(logicalId);
     }
     public void clear(){
         for(UUID id:new ArrayList<>(sent))remove(id);
-        sent.clear();packetIds.clear();states.clear();generations.clear();nextPingUpdateMillis.clear();skinRetryAtMillis.clear();profiles.clear();
+        sent.clear();packetIds.clear();states.clear();generations.clear();outlierPings.clear();nextPingUpdateMillis.clear();skinRetryAtMillis.clear();profiles.clear();
     }
     private record ResolvedState(FauxPlayerEntry entry, PlayerProfile profile, ProfileResolver.TextureProperty texture) {}
 

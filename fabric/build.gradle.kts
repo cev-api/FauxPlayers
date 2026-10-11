@@ -22,6 +22,7 @@ dependencies {
     implementation("net.fabricmc.fabric-api:fabric-api:0.159.0+26.2")
     implementation(project(":common"))
     implementation("org.yaml:snakeyaml:2.6")
+    implementation("com.google.code.gson:gson:2.13.1")
 }
 
 loom {
@@ -46,7 +47,7 @@ tasks.jar {
     archiveClassifier.set("fabric")
     from(project(":common").sourceSets.main.get().output)
     from(configurations.runtimeClasspath.get()
-        .filter { it.name.startsWith("snakeyaml-") }
+        .filter { it.name.startsWith("snakeyaml-") || it.name.startsWith("gson-") || it.name.startsWith("failureaccess-") }
         .map { if (it.isDirectory) it else zipTree(it) })
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }

@@ -63,13 +63,18 @@ public final class PluginConfig {
     public final String countMode, sampleMode, collision, relaySource, defaultMode;
     public final int fixed, additional, minimum, maximum, fixedMax, defaultLatency,
             pingMinimum, pingMaximum, pingStandardDeviation, pingRefreshSeconds,
-            refreshSeconds, connectTimeout, readTimeout, protocolVersion, maximumStaleSeconds;
+            refreshSeconds, connectTimeout, readTimeout, protocolVersion, maximumStaleSeconds,
+            outlierPingCount, outlierPingMinimum, outlierPingMaximum,
+            defaultLatencyMinimum, defaultLatencyMaximum, personaIntervalMinimumSeconds,
+            personaIntervalMaximumSeconds;
     public final boolean shuffle, keepCache, useCount, useMax, useSample, randomPing;
     public final int sampleLimit;
     public final List<FauxPlayerEntry> statics;
     public final String relayHost, httpUrl;
     public final int relayPort;
     public final String replayFile;
+    public final boolean llmEnabled, simulatedDeathsEnabled;
+    public final String llmEndpoint, llmApiKey, llmModel, llmMode, personaPromptFile, personaDataFile;
     public final double replaySpeed;
     public final int replayMaximumGapSeconds, replayMaximumPlayers;
     /** Literal text rewrites applied to a line before it is replayed: {from, to} pairs. */
@@ -91,6 +96,18 @@ public final class PluginConfig {
 
         replayEnabled = source.bool("replay.enabled", false);
         replayFile = source.text("replay.file", "replay/chat.csv");
+        llmEnabled = source.bool("personas.enabled", false);
+        String requestedPersonaMode = upper(source.text("personas.mode", "JOINED"));
+        llmMode = requestedPersonaMode.equals("ALWAYS") ? "ALWAYS" : "JOINED";
+        llmEndpoint = source.text("personas.endpoint", "https://api.openai.com/v1/chat/completions");
+        llmApiKey = source.text("personas.api-key", "");
+        llmModel = source.text("personas.model", "gpt-4o-mini");
+        personaPromptFile = source.text("personas.system-prompt-file", "minecraft_chat_personas_system_prompt.md");
+        personaDataFile = source.text("personas.persona-data-file", "minecraft_chat_personas.json");
+        personaIntervalMinimumSeconds = Math.max(10, source.integer("personas.interval-minimum-seconds", 30));
+        personaIntervalMaximumSeconds = Math.max(personaIntervalMinimumSeconds,
+                source.integer("personas.interval-maximum-seconds", 75));
+        simulatedDeathsEnabled = source.bool("simulated-deaths.enabled", false);
         replaySpeed = Math.max(0.01, source.decimal("replay.speed", 1.0));
         replayLoop = source.bool("replay.loop", true);
         replayMaximumGapSeconds = Math.max(0, source.integer("replay.maximum-gap-seconds", 0));
@@ -123,12 +140,19 @@ public final class PluginConfig {
         fixedMax = source.integer("max-players.fixed", 100);
         shuffle = source.bool("sample.shuffle", false);
         sampleLimit = source.integer("sample.maximum-entries", -1);
-        defaultLatency = Math.max(0, source.integer("tab.default-latency", 50));
+        int oldDefaultLatency = Math.max(0, source.integer("tab.default-latency", 50));
+        defaultLatencyMinimum = Math.max(0, source.integer("tab.default-latency-range.minimum", oldDefaultLatency));
+        defaultLatencyMaximum = Math.max(defaultLatencyMinimum,
+                source.integer("tab.default-latency-range.maximum", oldDefaultLatency));
+        defaultLatency = gaussian(defaultLatencyMinimum, defaultLatencyMaximum);
         randomPing = source.bool("tab.random-ping.enabled", true);
         pingMinimum = source.integer("tab.random-ping.minimum", 20);
         pingMaximum = source.integer("tab.random-ping.maximum", 100);
         pingStandardDeviation = source.integer("tab.random-ping.standard-deviation", 25);
         pingRefreshSeconds = source.integer("tab.random-ping.refresh-seconds", 30);
+        outlierPingCount = Math.max(0, source.integer("tab.outlier-ping.count", 0));
+        outlierPingMinimum = Math.max(0, source.integer("tab.outlier-ping.minimum", 300));
+        outlierPingMaximum = Math.max(outlierPingMinimum, source.integer("tab.outlier-ping.maximum", 1500));
         refreshSeconds = Math.max(1, source.integer("relay.refresh-seconds", 10));
         connectTimeout = Math.max(1, source.integer("relay.connect-timeout-ms", 3000));
         readTimeout = Math.max(1, source.integer("relay.read-timeout-ms", 3000));
@@ -147,7 +171,9 @@ public final class PluginConfig {
             String name = String.valueOf(map.getOrDefault("name", ""));
             if (name.isBlank()) continue;
             String displayName = String.valueOf(map.getOrDefault("display-name", name));
-            int latency = number(map.get("latency"), defaultLatency);
+            int latency = map.containsKey("latency")
+                    ? number(map.get("latency"), defaultLatency)
+                    : gaussian(defaultLatencyMinimum, defaultLatencyMaximum);
             entries.add(new FauxPlayerEntry(name, FauxPlayerEntry.stable("static", name),
                     displayName, Math.max(0, latency), defaultMode, false));
         }
@@ -165,6 +191,16 @@ public final class PluginConfig {
             catch (NumberFormatException ignored) { }
         }
         return fallback;
+    }
+
+    /** Bounded normal range: values cluster around the midpoint instead of filling endpoints uniformly. */
+    public static int gaussian(int minimum, int maximum) {
+        int min = Math.max(0, minimum), max = Math.max(min, maximum);
+        if (max == min) return min;
+        double deviation = Math.max(1.0, (max - min) / 6.0);
+        int value = (int) Math.round((min + max) / 2.0
+                + java.util.concurrent.ThreadLocalRandom.current().nextGaussian() * deviation);
+        return Math.max(min, Math.min(max, value));
     }
 
     private static String upper(String value) {

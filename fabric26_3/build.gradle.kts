@@ -19,6 +19,7 @@ sourceSets {
         java.srcDir("../fabric/src/main/java")
         java.exclude("**/CommandSuggestionMixin.java")
         java.srcDir("src/main/java")
+        resources.srcDir("../fabric/src/main/resources")
     }
 }
 
@@ -28,6 +29,7 @@ dependencies {
     implementation("net.fabricmc.fabric-api:fabric-api:0.160.5+26.3")
     implementation(project(":common"))
     implementation("org.yaml:snakeyaml:2.6")
+    implementation("com.google.code.gson:gson:2.13.1")
 }
 
 loom {
@@ -52,12 +54,13 @@ tasks.jar {
     archiveClassifier.set("fabric-26.3")
     from(project(":common").sourceSets.main.get().output)
     from(configurations.runtimeClasspath.get()
-        .filter { it.name.startsWith("snakeyaml-") }
+        .filter { it.name.startsWith("snakeyaml-") || it.name.startsWith("gson-") || it.name.startsWith("failureaccess-") }
         .map { if (it.isDirectory) it else zipTree(it) })
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 tasks.processResources {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     val modVersion = project.version
     inputs.property("version", modVersion)
     filesMatching("fabric.mod.json") {

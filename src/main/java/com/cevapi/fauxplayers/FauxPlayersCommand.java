@@ -51,6 +51,10 @@ public final class FauxPlayersCommand implements TabExecutor {
             case "remove" -> remove(sender, args);
             case "say", "chat" -> say(sender, args);
             case "ping" -> ping(sender, args);
+            case "outlierping" -> outlierPing(sender, args);
+            case "pingrange" -> pingRange(sender, args, "tab.random-ping.minimum", "tab.random-ping.maximum");
+            case "defaultping" -> pingRange(sender, args, "tab.default-latency-range.minimum", "tab.default-latency-range.maximum");
+            case "personas" -> { if (args.length > 1 && args[1].equalsIgnoreCase("status")) status(sender); else sender.sendMessage("§eUse /fauxplayers status or /fauxplayers get/set personas.<setting>."); }
             case "get" -> get(sender, args);
             case "set" -> set(sender, args);
             case "relay" -> relay(sender, args);
@@ -81,7 +85,26 @@ public final class FauxPlayersCommand implements TabExecutor {
                 + " §8| §7cache age: §f" + age);
         sender.sendMessage("§eReplay: §f" + plugin.config().replayEnabled
                 + " §8| §7lines: §f" + plugin.replay().position() + "§7/§f" + plugin.replay().eventCount()
-                + " §8| §7players: §f" + plugin.replay().playerCount());
+                + " §8| §7players: §f" + plugin.replay().playerCount()
+                + " §8| §7chat: §f" + plugin.config().replayChat + " §7Discord: §f" + plugin.config().replayDiscordChat
+                + " §7deaths/events: §f" + plugin.config().replayDeaths + "/" + plugin.config().replayEvents
+                + " §7speed: §f" + plugin.config().replaySpeed + " §7max gap: §f" + plugin.config().replayMaximumGapSeconds + "s"
+                + " §7next: §f" + (plugin.replay().nextDueInMillis() < 0 ? "(none)" : seconds(plugin.replay().nextDueInMillis())));
+        sender.sendMessage("§eReplay chat events: §f" + plugin.replay().chatEventCount() + " §8| §7next in-game chat: §f"
+                + (plugin.replay().nextChatInMillis() < 0 ? "(none remaining)" : seconds(plugin.replay().nextChatInMillis()))
+                + " §8| §7Discord messages: §f" + plugin.replay().discordEventCount());
+        var cfg = plugin.config();
+        sender.sendMessage("§ePings: §frandom=" + cfg.randomPing + " (" + cfg.pingMinimum + "–" + cfg.pingMaximum
+                + "ms), default=" + cfg.defaultLatencyMinimum + "–" + cfg.defaultLatencyMaximum + "ms, outliers="
+                + plugin.tab().activeOutlierPingCount() + "/" + cfg.outlierPingCount + " (" + cfg.outlierPingMinimum + "–" + cfg.outlierPingMaximum + "ms)");
+        var persona = plugin.personaStatus();
+        sender.sendMessage("§ePersonas: §f" + cfg.llmEnabled + " §8| §7model: §f" + cfg.llmModel
+                + " §8| §7endpoint: §f" + cfg.llmEndpoint + " §8| §7API key: §f" + (cfg.llmApiKey.isBlank() ? "not set" : "configured (hidden)"));
+        sender.sendMessage("§ePersona mode: §f" + cfg.llmMode + " §8| §7active: §f" + plugin.personaSessionActive() + " §8| §7real players: §f" + plugin.getServer().getOnlinePlayers().size());
+        sender.sendMessage("§ePersona chat: §f" + (plugin.personaParticipantCount()) + " participants §8| §7interval: §f"
+                + cfg.personaIntervalMinimumSeconds + "–" + cfg.personaIntervalMaximumSeconds + "s §8| §7requests: §f" + persona.requests()
+                + " §8| §7in flight: §f" + persona.inFlight() + " §8| §7last: §f" + (persona.lastError() == null ? persona.lastMessageCount() + " line(s)" : persona.lastError()));
+        sender.sendMessage("§eSimulated deaths: §f" + cfg.simulatedDeathsEnabled + " §8| §7replay: §f" + cfg.replayEnabled);
         sender.sendMessage("§eLast error: §f"
                 + (plugin.relay().lastError() == null ? "none" : plugin.relay().lastError()));
         if (!plugin.config().relayEnabled && !cached.players().isEmpty()) {
@@ -215,6 +238,43 @@ public final class FauxPlayersCommand implements TabExecutor {
         sender.sendMessage("§aSet fake ping for §f" + args[1] + " §ato §f" + ping + "ms§a.");
     }
 
+    private void outlierPing(CommandSender sender, String[] args) {
+        if (args.length >= 3 && args[1].equalsIgnoreCase("set")) { pingRange(sender, args, "tab.outlier-ping.minimum", "tab.outlier-ping.maximum"); return; }
+        if (args.length < 2) {
+            sender.sendMessage("§eUsage: §f/fauxplayers outlierping <count> §7(0 disables)");
+            return;
+        }
+        try {
+            int count = Integer.parseInt(args[1]);
+            if (count < 0) throw new NumberFormatException();
+            plugin.getConfig().set("tab.outlier-ping.count", count);
+            plugin.saveConfig();
+            plugin.reloadPlugin();
+            int selected = plugin.tab().outlierPingCount(count, plugin.tabEntries());
+            sender.sendMessage("§aOutlier pings applied to §f" + selected
+                    + " §afaux players at §f" + plugin.config().outlierPingMinimum + "–" + plugin.config().outlierPingMaximum + "ms§a. Use §f/fauxplayers outlierping set <min>-<max>§a; 0 disables.");
+        } catch (NumberFormatException error) {
+            sender.sendMessage("§cCount must be a non-negative number.");
+        }
+    }
+
+    private void pingRange(CommandSender sender, String[] args, String minimumKey, String maximumKey) {
+        if (args.length < 3 || !args[1].equalsIgnoreCase("set")) { sender.sendMessage("§eUsage: §f/fauxplayers " + args[0] + " set <min>-<max>"); return; }
+        String[] parts = args[2].split("-", -1);
+        try {
+            if (parts.length != 2) throw new NumberFormatException();
+            int min = Integer.parseInt(parts[0]), max = Integer.parseInt(parts[1]);
+            if (min < 0 || max < min || max > 100000) throw new NumberFormatException();
+            plugin.getConfig().set(minimumKey, min); plugin.getConfig().set(maximumKey, max);
+            plugin.saveConfig(); plugin.reloadPlugin(); plugin.tab().refreshPings();
+            sender.sendMessage("§aSet ping range to §f" + min + "–" + max + "ms§a.");
+        } catch (NumberFormatException error) { sender.sendMessage("§cUse a valid non-negative range, for example 300-1500."); }
+    }
+
+    private String settingValue(String key) {
+        return key.equals("personas.api-key") ? (plugin.getConfig().getString(key, "").isBlank() ? "(not set)" : "(configured; hidden)") : String.valueOf(plugin.getConfig().get(key));
+    }
+
     private void get(CommandSender sender, String[] args) {
         if (args.length < 2) {
             sender.sendMessage("§eUse §f/fauxplayers get <setting>§e. Supported settings:");
@@ -225,14 +285,14 @@ public final class FauxPlayersCommand implements TabExecutor {
             sender.sendMessage("§cUnknown setting. §7Use /fauxplayers get for the list.");
             return;
         }
-        sender.sendMessage("§e" + args[1] + " §8= §f" + plugin.getConfig().get(args[1]));
+        sender.sendMessage("§e" + args[1] + " §8= §f" + settingValue(args[1]));
     }
 
     private void set(CommandSender sender, String[] args) {
         if (args.length < 2) {
             sender.sendMessage("§eUse §f/fauxplayers set <setting> <value>§e. Current settings:");
             for (String key : CommandCatalog.SETTINGS) {
-                sender.sendMessage("§7" + key + " §8= §f" + plugin.getConfig().get(key));
+                sender.sendMessage("§7" + key + " §8= §f" + settingValue(key));
             }
             return;
         }
@@ -241,7 +301,7 @@ public final class FauxPlayersCommand implements TabExecutor {
             return;
         }
         if (args.length < 3) {
-            sender.sendMessage("§e" + args[1] + " §8= §f" + plugin.getConfig().get(args[1])
+            sender.sendMessage("§e" + args[1] + " §8= §f" + settingValue(args[1])
                     + " §7(current value; provide a new value to change it)");
             return;
         }
@@ -254,7 +314,7 @@ public final class FauxPlayersCommand implements TabExecutor {
         plugin.getConfig().set(args[1], value);
         plugin.saveConfig();
         plugin.reloadPlugin();
-        sender.sendMessage("§aSet §f" + args[1] + " §a= §f" + value);
+        sender.sendMessage("§aSet §f" + args[1] + " §a= §f" + (args[1].equals("personas.api-key") ? "(configured; hidden)" : value));
     }
 
     private Object parse(String raw, Object old) {
@@ -277,10 +337,17 @@ public final class FauxPlayersCommand implements TabExecutor {
             sender.sendMessage("§bReplay §8» §7enabled=§f" + plugin.config().replayEnabled
                     + " §8| §7file=§f" + plugin.config().replayFile
                     + " §8| §7speed=§f" + plugin.config().replaySpeed
-                    + " §8| §7loop=§f" + plugin.config().replayLoop);
+                    + " §8| §7loop=§f" + plugin.config().replayLoop
+                    + " §8| §7chat=§f" + plugin.config().replayChat
+                    + " §8| §7discord-chat=§f" + plugin.config().replayDiscordChat
+                    + " §8| §7deaths/events=§f" + plugin.config().replayDeaths + "/" + plugin.config().replayEvents
+                    + " §8| §7max-gap=§f" + plugin.config().replayMaximumGapSeconds + "s");
             sender.sendMessage("§7Lines: §f" + replay.position() + "§7/§f" + replay.eventCount()
                     + " §8| §7players: §f" + replay.playerCount()
                     + " §8| §7finished: §f" + replay.finished());
+            sender.sendMessage("§7Chat events: §f" + replay.chatEventCount() + " §8| §7next in-game chat: §f"
+                    + (replay.nextChatInMillis() < 0 ? "(none remaining)" : seconds(replay.nextChatInMillis()))
+                    + " §8| §7Discord messages: §f" + replay.discordEventCount());
             sender.sendMessage("§7Clock: §f" + span(replay.clockMillis()) + "§7 of §f" + span(replay.timelineMillis())
                     + " §8| §7next line in §f" + (replay.nextDueInMillis() < 0 ? "(none)" : seconds(replay.nextDueInMillis()))
                     + " §8| §7ticks driven: §f" + replay.ticks());
@@ -572,6 +639,10 @@ public final class FauxPlayersCommand implements TabExecutor {
         sender.sendMessage("§f/fauxplayers §bremove <name> §8- §7Remove a static fake");
         sender.sendMessage("§f/fauxplayers §bsay <name> <message> §8- §7Broadcast fake chat");
         sender.sendMessage("§f/fauxplayers §bget/set <setting> §8- §7Inspect or change settings");
+        sender.sendMessage("§f/fauxplayers §boutlierping <count> §8- §7Choose random high-ping faux players");
+        sender.sendMessage("§f/fauxplayers §boutlierping set <min>-<max> §8- §7Set outlier ping range");
+        sender.sendMessage("§f/fauxplayers §bpingrange/defaultping set <min>-<max> §8- §7Set normal/default ping ranges");
+        sender.sendMessage("§f/fauxplayers §bpersonas status §8- §7Show persona chat status");
         sender.sendMessage("§f/fauxplayers §brelay <enable|disable|host|port|source|refresh> ...");
         sender.sendMessage("§f/fauxplayers §breplay <" + CommandCatalog.replayUsage() + "> ...");
     }
@@ -584,6 +655,8 @@ public final class FauxPlayersCommand implements TabExecutor {
         }
 
         String root = args[0].toLowerCase(Locale.ROOT);
+        if (root.equals("outlierping") && args.length == 2) return partial(args[1], List.of("set"));
+        if ((root.equals("pingrange") || root.equals("defaultping")) && args.length == 2) return partial(args[1], List.of("set"));
         if (root.equals("add") || root.equals("remove") || root.equals("say")
                 || root.equals("chat") || root.equals("ping")) {
             if (args.length == 2) return partial(args[1], knownNames());

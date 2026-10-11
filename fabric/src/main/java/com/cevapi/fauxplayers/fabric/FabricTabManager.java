@@ -30,6 +30,8 @@ final class FabricTabManager {
     private final Map<UUID, Long> nextPingUpdate = new HashMap<>();
     /** When each entry may be asked for again, so a missing head is retried without hammering. */
     private final Map<UUID, Long> nextProfileAttempt = new HashMap<>();
+    private final Set<UUID> outlierPings = new HashSet<>();
+    private int appliedOutlierSetting = Integer.MIN_VALUE;
     private static final long PROFILE_RETRY_MILLIS = 20_000L;
     /** A name Mojang reports as having no account is still retried, just far less often. */
     private static final long MISSING_PROFILE_RETRY_MILLIS = 600_000L;
@@ -60,6 +62,13 @@ final class FabricTabManager {
         for (UUID id : new ArrayList<>(sent)) {
             if (!wanted.containsKey(id)) remove(id);
         }
+        int targetOutliers = Math.min(config.outlierPingCount, wanted.size());
+        boolean staleOutlier = outlierPings.stream().anyMatch(id -> !wanted.containsKey(id));
+        if (appliedOutlierSetting != config.outlierPingCount || staleOutlier
+                || outlierPings.size() < targetOutliers) {
+            outlierPingCount(config.outlierPingCount, new ArrayList<>(wanted.values()));
+            appliedOutlierSetting = config.outlierPingCount;
+        }
         long now = System.currentTimeMillis();
         for (FauxPlayerEntry entry : wanted.values()) {
             if (sent.add(entry.uuid())) {
@@ -89,6 +98,7 @@ final class FabricTabManager {
         for (UUID id : new ArrayList<>(sent)) remove(id);
         entries.clear();
         profileCache.clear();
+        outlierPings.clear();
         nextPingUpdate.clear();
         nextProfileAttempt.clear();
         profiles.clear();
@@ -96,6 +106,27 @@ final class FabricTabManager {
 
     CompletableFuture<String> canonicalName(String name) {
         return profiles.canonicalName(name);
+    }
+
+    int outlierPingCount(int count, List<FauxPlayerEntry> displayed) {
+        outlierPings.clear();
+        List<FauxPlayerEntry> candidates = new ArrayList<>(displayed);
+        java.util.Collections.shuffle(candidates);
+        candidates.stream().limit(Math.max(0, count)).forEach(entry -> outlierPings.add(entry.uuid()));
+        for (FauxPlayerEntry entry : new ArrayList<>(entries.values())) {
+            FauxPlayerEntry next = effective(entry);
+            entries.put(entry.uuid(), next);
+            for (ServerPlayer viewer : server.getPlayerList().getPlayers()) sendUpdate(viewer, next);
+        }
+        return outlierPings.size();
+    }
+    int activeOutlierPingCount() { return outlierPings.size(); }
+    void refreshPings() {
+        for (FauxPlayerEntry entry : new ArrayList<>(entries.values())) {
+            FauxPlayerEntry next = effective(entry);
+            entries.put(entry.uuid(), next);
+            for (ServerPlayer viewer : server.getPlayerList().getPlayers()) sendUpdate(viewer, next);
+        }
     }
 
     /**
@@ -147,6 +178,7 @@ final class FabricTabManager {
     private void remove(UUID id) {
         sent.remove(id);
         entries.remove(id);
+        outlierPings.remove(id);
         profileCache.remove(id);
         nextPingUpdate.remove(id);
         nextProfileAttempt.remove(id);
@@ -157,6 +189,8 @@ final class FabricTabManager {
     }
 
     private FauxPlayerEntry effective(FauxPlayerEntry entry) {
+        if (outlierPings.contains(entry.uuid())) return withLatency(entry,
+                PluginConfig.gaussian(config.outlierPingMinimum, config.outlierPingMaximum));
         if (config == null || !config.randomPing) return entry;
         int min = Math.max(0, config.pingMinimum);
         int max = Math.max(min, config.pingMaximum);

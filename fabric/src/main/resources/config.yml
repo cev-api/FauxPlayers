@@ -24,12 +24,19 @@ tab:
   include-relayed-players: true
   include-replay: true
   default-latency: 50
+  default-latency-range:
+    minimum: 50
+    maximum: 50
   random-ping:
     enabled: true
     minimum: 20
     maximum: 100
     standard-deviation: 25
     refresh-seconds: 30
+  outlier-ping:
+    count: 0
+    minimum: 300
+    maximum: 1500
   default-gamemode: SURVIVAL
 messages:
   enabled: true
@@ -89,3 +96,18 @@ relay:
     tab-list: true
   names:
     collision-behaviour: REMOVE_DUPLICATE_REMOTE
+
+personas:
+  enabled: false
+  # JOINED chats only while at least one real player is online; ALWAYS chats after server startup.
+  mode: JOINED
+  endpoint: https://api.openai.com/v1/chat/completions
+  api-key: ""
+  model: gpt-4o-mini
+  system-prompt-file: minecraft_chat_personas_system_prompt.md
+  persona-data-file: minecraft_chat_personas.json
+  interval-minimum-seconds: 30
+  interval-maximum-seconds: 75
+
+simulated-deaths:
+  enabled: false

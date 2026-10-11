@@ -3,13 +3,19 @@ package com.cevapi.fauxplayers;
 import com.cevapi.fauxplayers.core.*; import java.io.*; import java.util.*; import net.kyori.adventure.text.Component; import net.kyori.adventure.text.format.NamedTextColor; import org.bukkit.Bukkit; import org.bukkit.event.*; import org.bukkit.scheduler.BukkitTask; import org.bukkit.event.player.PlayerJoinEvent; import org.bukkit.event.player.PlayerQuitEvent; import org.bukkit.event.player.PlayerCommandSendEvent; import org.bukkit.plugin.java.JavaPlugin; import org.bukkit.configuration.file.FileConfiguration; import org.bukkit.configuration.file.YamlConfiguration;
 
 public final class FauxPlayersPlugin extends JavaPlugin {
+ private final PersonaChatManager personaChat=new PersonaChatManager();
+ private final FauxDeathSimulator deathSimulator=new FauxDeathSimulator();
+ private String personaSystemPrompt="";
+ private long simulationLastTick=System.currentTimeMillis();
+ private volatile long nextPersonaAtMillis;
  private PluginConfig config; private RelayManager relay; private ReplayManager replay; private TabListManager tab; private TabHeaderManager header; private TabDisplayBridge displayBridge; private PlayerListObjectiveBridge playerListObjective; private TabPlaceholderIntegration tabPlaceholders; private CommandAutocompleteFilter autocompleteFilter; private BukkitTask syncTask; private boolean observedJoinMessage, observedLeaveMessage; private String joinMessageTemplate, leaveMessageTemplate; private File messageCacheFile; private FileConfiguration messageCache;
  /** The fake entries currently shown, so a configuration change can announce what it adds or removes. */
  private int tickFailures;
  @Override public void onEnable(){saveDefaultConfig();loadMessageCache();if(Bukkit.getPluginManager().getPlugin("ProtocolLib")!=null){displayBridge=new TabDisplayBridge(this);displayBridge.enable();}if(Bukkit.getPluginManager().getPlugin("TAB")!=null){playerListObjective=new PlayerListObjectiveBridge(this);playerListObjective.enable();}reloadLocal();if(Bukkit.getPluginManager().getPlugin("ProtocolLib")!=null){header=new TabHeaderManager(this);header.enable();}if(Bukkit.getPluginManager().getPlugin("TAB")!=null){tabPlaceholders=new TabPlaceholderIntegration(this);tabPlaceholders.enable();}autocompleteFilter=new CommandAutocompleteFilter(this);autocompleteFilter.enable();getCommand("fauxplayers").setExecutor(new FauxPlayersCommand(this));getServer().getPluginManager().registerEvents(new StatusPingListener(this),this);getServer().getPluginManager().registerEvents(new Listener(){
-  @EventHandler(priority=EventPriority.MONITOR) public void join(PlayerJoinEvent e){observeServerMessage(e.getJoinMessage(),e.getPlayer().getName(),true);tab.sendTo(e.getPlayer(),tabEntries());}
+  @EventHandler(priority=EventPriority.MONITOR) public void join(PlayerJoinEvent e){observeServerMessage(e.getJoinMessage(),e.getPlayer().getName(),true);tab.sendTo(e.getPlayer(),tabEntries());updatePersonaLifecycle();}
   @EventHandler(priority=EventPriority.HIGHEST) public void commandSend(PlayerCommandSendEvent e){if(!e.getPlayer().isOp())e.getCommands().removeIf(name->{String command=name.toLowerCase(Locale.ROOT);int separator=command.indexOf(':');if(separator>=0)command=command.substring(separator+1);return command.equals("fauxplayers")||command.equals("fp")||command.equals("fakeplayers");});}
-  @EventHandler(priority=EventPriority.MONITOR) public void quit(PlayerQuitEvent e){observeServerMessage(e.getQuitMessage(),e.getPlayer().getName(),false);}
+  @EventHandler(priority=EventPriority.MONITOR) public void quit(PlayerQuitEvent e){observeServerMessage(e.getQuitMessage(),e.getPlayer().getName(),false);getServer().getScheduler().runTask(FauxPlayersPlugin.this,FauxPlayersPlugin.this::updatePersonaLifecycle);}
+  @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true) public void chat(io.papermc.paper.event.player.AsyncChatEvent e){handlePersonaInput(e.getPlayer().getName(),net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(e.message()));}
  },this);getLogger().info("FauxPlayers enabled; presentation-only entries are never server players.");}
  private void reloadLocal(){
   // The list from before this change, so the announcement covers only what the change did. A
@@ -18,7 +24,9 @@ public final class FauxPlayersPlugin extends JavaPlugin {
   PluginConfig previous=config;
   PlayerSnapshot snapshot=relay!=null?relay.snapshot():PlayerSnapshot.empty();
   List<FauxPlayerEntry> before=entriesFor(previous,snapshot);
-  config=PluginConfig.load(new PluginConfig.Source(){public Object get(String path){return getConfig().get(path);}});
+  config=PluginConfig.load(new PluginConfig.Source(){public Object get(String path){return getConfig().get(path);}});loadPersonaPrompt();
+  updatePersonaLifecycle();
+  getLogger().info("Persona chat " +(config.llmEnabled?"enabled":"disabled")+"; model="+config.llmModel+", API key="+(config.llmApiKey.isBlank()?"not configured":"configured (hidden)")+", files="+replayFilePath(config.personaPromptFile)+" and "+replayFilePath(config.personaDataFile));
   if(relay==null)relay=new RelayManager(new RelayManager.Host(){public void fine(String message){getLogger().fine(message);}public void warning(String message){getLogger().warning(message);}public void remoteChanged(PlayerSnapshot oldSnapshot,PlayerSnapshot newSnapshot){getServer().getScheduler().runTask(FauxPlayersPlugin.this,()->FauxPlayersPlugin.this.remoteChanged(oldSnapshot,newSnapshot));}});else relay.stop();
   if(tab==null)tab=new TabListManager(this);
   if(replay==null)replay=new ReplayManager(new ReplayManager.Host(){
@@ -35,6 +43,9 @@ public final class FauxPlayersPlugin extends JavaPlugin {
   if(syncTask==null)syncTask=getServer().getScheduler().runTaskTimer(this,()->{
    try{
     replay.tick();
+    long now=System.currentTimeMillis();long elapsed=now-simulationLastTick;simulationLastTick=now;
+    if(personaSessionActive()&&now>=nextPersonaAtMillis){scheduleNextPersona();requestPersonaConversation();}
+    if(config.simulatedDeathsEnabled&&!config.replayEnabled){String death=deathSimulator.tick(elapsed,tabEntries());if(death!=null)Bukkit.broadcastMessage("§7"+death);}
     if(!config.enabled||!config.tabEnabled)tab.clear();else {tab.sync(config,tabEntries());tab.reassertPings();}
    }catch(Throwable error){
     // A repeating task dies for good if its body throws, which would silently freeze the replay
@@ -61,6 +72,13 @@ public final class FauxPlayersPlugin extends JavaPlugin {
   for(Map.Entry<String,String> entry:was.entrySet())if(!now.containsKey(entry.getKey()))fakeMessage(entry.getValue(),false);
  }
  public PluginConfig config(){return config;} public RelayManager relay(){return relay;} public ReplayManager replay(){return replay;} public TabListManager tab(){return tab;} public TabDisplayBridge displayBridge(){return displayBridge;} public PlayerListObjectiveBridge playerListObjective(){return playerListObjective;}
+ public PersonaChatManager.Status personaStatus(){return personaChat.status();}
+ public int personaParticipantCount(){return tabEntries().size();}
+ public boolean personaSessionActive(){return config!=null&&config.llmEnabled&&(config.llmMode.equals("ALWAYS")||!getServer().getOnlinePlayers().isEmpty());}
+ private long randomPersonaDelay(long minimum,long maximum){return java.util.concurrent.ThreadLocalRandom.current().nextLong(minimum,maximum+1);}
+ private void updatePersonaLifecycle(){if(config==null||!config.llmEnabled){if(nextPersonaAtMillis!=0)personaChat.clearHistory();nextPersonaAtMillis=0;return;}if(config.llmMode.equals("JOINED")&&getServer().getOnlinePlayers().isEmpty()){if(nextPersonaAtMillis!=0)personaChat.clearHistory();nextPersonaAtMillis=0;return;}if(nextPersonaAtMillis==0){nextPersonaAtMillis=System.currentTimeMillis()+randomPersonaDelay(8,18)*1000L;getLogger().info("Persona chat session started (mode="+config.llmMode+").");}}
+ private void scheduleNextPersona(){long low=config.personaIntervalMinimumSeconds,high=config.personaIntervalMaximumSeconds;long seconds=low==high?low:randomPersonaDelay(low,high);nextPersonaAtMillis=System.currentTimeMillis()+seconds*1000L;}
+ private void requestPersonaConversation(){List<String> names=tabEntries().stream().map(FauxPlayerEntry::name).limit(10).toList();if(names.size()<2){getLogger().fine("Persona conversation skipped: fewer than two active faux players.");return;}boolean started=personaChat.requestConversation(config.llmEndpoint,config.llmApiKey,config.llmModel,personaSystemPrompt,names,lines->getServer().getScheduler().runTask(this,()->{if(!personaSessionActive()){personaChat.clearHistory();return;}getLogger().info("Persona conversation completed with "+lines.size()+" line(s).");for(var line:lines)sendFauxChat(line.name(),line.message());}),error->getLogger().warning("Persona conversation failed: "+error.getMessage()));if(started)getLogger().info("Persona conversation request started for "+names.size()+" active faux players.");}
  private java.nio.file.Path replayFile(PluginConfig current){if(current.replayFile==null||current.replayFile.isBlank())return null;java.nio.file.Path resolved=java.nio.file.Path.of(current.replayFile);return resolved.isAbsolute()?resolved:new File(getDataFolder(),current.replayFile).toPath();}
  /** Names the server already knows are in-game players, used to read relayed chat correctly. */
  public java.util.Set<String> knownReplayPlayers(){java.util.Set<String> names=new java.util.LinkedHashSet<>();if(config==null)return names;for(FauxPlayerEntry entry:config.statics)names.add(entry.name());for(FauxPlayerEntry entry:relaySnapshot().players())names.add(entry.name());return names;}
@@ -130,5 +148,9 @@ public final class FauxPlayersPlugin extends JavaPlugin {
   Component vanilla=Component.translatable(key,Component.text(name)).color(NamedTextColor.YELLOW);
   Bukkit.broadcast(vanilla);
  } public void remoteChanged(PlayerSnapshot oldSnapshot, PlayerSnapshot newSnapshot){if(oldSnapshot.refreshedAt()==null)return;Set<String> oldNames=new HashSet<>();for(FauxPlayerEntry e:oldSnapshot.players())oldNames.add(e.name().toLowerCase(Locale.ROOT));Set<String> newNames=new HashSet<>();for(FauxPlayerEntry e:newSnapshot.players())newNames.add(e.name().toLowerCase(Locale.ROOT));for(FauxPlayerEntry e:newSnapshot.players())if(!oldNames.contains(e.name().toLowerCase(Locale.ROOT)))fakeMessage(e.name(),true);for(FauxPlayerEntry e:oldSnapshot.players())if(!newNames.contains(e.name().toLowerCase(Locale.ROOT)))fakeMessage(e.name(),false);}
+ private void loadPersonaPrompt(){try{personaSystemPrompt=readPersonaResource(config.personaPromptFile,"minecraft_chat_personas_system_prompt.md")+"\n\nStructured persona roster:\n"+readPersonaResource(config.personaDataFile,"minecraft_chat_personas.json");}catch(Exception error){personaSystemPrompt="Generate short natural Minecraft group chat.";getLogger().warning("Could not load persona prompt: "+error.getMessage());}}
+ private String readPersonaResource(String configured,String bundled)throws IOException{java.nio.file.Path path=replayFilePath(configured);boolean replace=!java.nio.file.Files.exists(path);if(!replace){String previous=java.nio.file.Files.readString(path);replace=previous.contains("automated nature must be disclosed")||previous.contains("live_mode_disclosure");if(!replace)return previous;}java.nio.file.Files.createDirectories(path.getParent());try(var input=getResource(bundled)){if(input==null)throw new IOException("missing persona resource: "+bundled);java.nio.file.Files.copy(input,path,java.nio.file.StandardCopyOption.REPLACE_EXISTING);}return java.nio.file.Files.readString(path);}
+ private java.nio.file.Path replayFilePath(String value){java.nio.file.Path path=java.nio.file.Path.of(value);return path.isAbsolute()?path:new File(getDataFolder(),value).toPath();}
+ private void handlePersonaInput(String speaker,String text){if(!personaSessionActive()||text==null||text.isBlank())return;personaChat.recordPlayerMessage(speaker,text);nextPersonaAtMillis=System.currentTimeMillis()+randomPersonaDelay(8,18)*1000L;}
  @Override public void onDisable(){if(syncTask!=null)syncTask.cancel();if(replay!=null)replay.stop();if(tabPlaceholders!=null)tabPlaceholders.close();if(header!=null)header.close();if(displayBridge!=null)displayBridge.close();if(tab!=null)tab.clear();if(playerListObjective!=null)playerListObjective.close();if(autocompleteFilter!=null)autocompleteFilter.close();if(relay!=null)relay.stop();}
 }

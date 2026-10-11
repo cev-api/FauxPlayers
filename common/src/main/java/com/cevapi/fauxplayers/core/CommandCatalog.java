@@ -6,7 +6,7 @@ import java.util.List;
 public final class CommandCatalog {
     public static final List<String> ROOT = List.of(
             "reload", "status", "info", "refresh", "list", "add", "remove",
-            "say", "chat", "ping", "get", "set", "relay", "replay");
+            "say", "chat", "ping", "outlierping", "pingrange", "defaultping", "personas", "get", "set", "relay", "replay");
     public static final List<String> RELAY_OPTIONS = List.of(
             "enable", "enabled", "disable", "host", "port", "source", "refresh-seconds", "refresh");
     public static final List<String> REPLAY_OPTIONS = List.of(
@@ -16,16 +16,24 @@ public final class CommandCatalog {
     public static final List<String> SETTINGS = List.of(
             "enabled", "status.enabled", "status.include-real-players", "status.include-static-fakes",
             "status.include-relayed-players", "count.mode", "count.fixed", "count.additional",
-            "count.minimum", "count.maximum", "max-players.fixed", "sample.mode", "sample.shuffle",
+            "count.minimum", "count.maximum", "max-players.mode", "max-players.fixed", "sample.mode", "sample.shuffle",
             "sample.maximum-entries", "tab.enabled", "tab.include-static-fakes", "tab.include-relayed-players",
-            "tab.default-latency", "tab.default-gamemode", "tab.random-ping.enabled", "tab.random-ping.minimum",
+            "tab.default-latency", "tab.default-latency-range.minimum", "tab.default-latency-range.maximum",
+            "tab.default-gamemode", "tab.random-ping.enabled", "tab.random-ping.minimum",
             "tab.random-ping.maximum", "tab.random-ping.standard-deviation", "tab.random-ping.refresh-seconds",
+            "tab.outlier-ping.count", "tab.outlier-ping.minimum", "tab.outlier-ping.maximum",
+            "personas.enabled", "personas.mode", "personas.endpoint", "personas.api-key", "personas.model",
+            "personas.system-prompt-file", "personas.persona-data-file", "personas.interval-minimum-seconds",
+            "personas.interval-maximum-seconds", "simulated-deaths.enabled",
+            "messages.enabled", "messages.join", "messages.leave",
             "relay.enabled", "relay.source", "relay.status.host", "relay.status.port",
-            "relay.status.protocol-version", "relay.http.url", "relay.refresh-seconds",
+            "relay.status.protocol-version", "relay.query.host", "relay.query.port", "relay.query.protocol-version",
+            "relay.http.url", "relay.use-for.online-count", "relay.use-for.max-players", "relay.use-for.status-sample",
+            "relay.use-for.tab-list", "relay.use-for.motd", "relay.names.collision-behaviour", "relay.refresh-seconds",
             "relay.connect-timeout-ms", "relay.read-timeout-ms", "relay.keep-last-successful-result",
             "relay.maximum-stale-seconds", "replay.enabled", "replay.file", "replay.speed",
             "replay.loop", "replay.maximum-gap-seconds", "replay.maximum-players", "replay.chat",
-            "replay.discord-chat", "replay.deaths", "replay.events", "tab.include-replay",
+            "replay.discord-chat", "replay.deaths", "replay.events", "replay.replacements", "tab.include-replay",
             "status.include-replay", "replay.announce-seeks", "replay.skip-real-players");
 
     private CommandCatalog() {
@@ -45,10 +53,15 @@ public final class CommandCatalog {
                     "status.include-relayed-players", "sample.shuffle", "tab.enabled",
                     "tab.include-static-fakes", "tab.include-relayed-players", "tab.random-ping.enabled",
                     "relay.enabled", "relay.keep-last-successful-result", "replay.enabled", "replay.loop",
+                    "relay.use-for.online-count", "relay.use-for.max-players", "relay.use-for.status-sample",
+                    "relay.use-for.tab-list", "relay.use-for.motd", "messages.enabled",
                     "replay.chat", "replay.discord-chat", "replay.deaths", "replay.events",
                     "replay.announce-seeks", "replay.skip-real-players",
-                    "tab.include-replay", "status.include-replay" -> List.of("true", "false");
+                    "tab.include-replay", "status.include-replay", "personas.enabled",
+                    "simulated-deaths.enabled" -> List.of("true", "false");
+            case "personas.mode" -> List.of("JOINED", "ALWAYS");
             case "count.mode" -> List.of("COMBINED", "FIXED", "ADDITIONAL", "RANDOM", "REMOTE");
+            case "max-players.mode" -> List.of("LOCAL", "FIXED", "REMOTE");
             case "sample.mode" -> List.of("REAL", "REMOTE", "COMBINED");
             case "tab.default-gamemode" -> List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
             case "relay.source" -> List.of("STATUS", "HTTP");

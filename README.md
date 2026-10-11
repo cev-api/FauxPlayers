@@ -11,6 +11,8 @@ It supports:
 - Relaying players from another server or HTTP source.
 - Replaying an exported Discord chat history into the server.
 - Simulated ping, skins, heads, and TAB scores.
+- Fake player conversations and personas powered by an OpenAI compatible API.
+- Fake player deaths and kills (among other fake players).
 
 The project has one shared core.
 The build creates one Paper JAR and separate Fabric JARs for Minecraft 26.2
@@ -160,7 +162,20 @@ tab:
   include-relayed-players: true
   include-replay: true
   default-latency: 50
+  default-latency-range:
+    minimum: 50
+    maximum: 50
   default-gamemode: SURVIVAL
+  outlier-ping:
+    count: 2 # Random faux players assigned unusually high pings; 0 disables.
+    minimum: 300
+    maximum: 1500
+  random-ping:
+    enabled: true
+    minimum: 20
+    maximum: 100
+    standard-deviation: 25
+    refresh-seconds: 30
 
 static-players:
   - name: Herobrine
@@ -189,7 +204,44 @@ replay:
   events: true
   announce-seeks: true
   skip-real-players: true
+
+# OpenAI-compatible live persona chat. The API key is stored in this file.
+personas:
+  enabled: true
+  mode: JOINED # JOINED waits for a real player; ALWAYS starts after server startup
+  endpoint: https://api.deepseek.com/chat/completions
+  api-key: "YOUR_DEEPSEEK_API_KEY"
+  model: deepseek-v4-flash
+  system-prompt-file: minecraft_chat_personas_system_prompt.md
+  persona-data-file: minecraft_chat_personas.json
+  interval-minimum-seconds: 30
+  interval-maximum-seconds: 75
+
+# Occasional text-only faux-player deaths, only when replay is disabled.
+simulated-deaths:
+  enabled: false
 ~~~
+
+## Persona chat and simulated deaths
+
+Persona chat keeps one ongoing conversation between active faux players, using
+the configured OpenAI-compatible chat-completions endpoint. Real-player messages
+are added as context. Each turn sends at most one line, and the next turn waits a random interval from the configured range. Generated lines are usually lowercase 
+and punctuation is stripped most of the time.
+
+`personas.mode: JOINED` pauses chat when the last real player leaves, starts it
+after a player joins, and clears the conversation history when the server empties.
+`personas.mode: ALWAYS` starts after server startup and continues even when no
+real players are online. The supplied Markdown prompt and JSON roster are
+copied to the config folder on first use and can be edited there. Only active
+tab-list faux names can be generated as speakers; the model returns at most one
+short message per turn. Replace the example DeepSeek key with your
+own key before starting the server.
+
+`simulated-deaths.enabled` enables occasional text-only faux-player death
+announcements while replay is disabled. These are chat announcements; faux
+players remain display entries and do not become entities or cause actual game
+deaths.
 
 Static entries support `name`, `display-name`, and `latency`.
 Static and relayed UUIDs are stable.
@@ -343,13 +395,19 @@ Use `/fauxplayers`.
 
 | Command | Function |
 |---|---|
-| `/fauxplayers status` | Shows real and relay state. |
+| `/fauxplayers status` | Shows real, relay, replay, persona, simulated-death, and ping-range state. The API key is always hidden. |
 | `/fauxplayers list` | Lists static and cached relay names. |
 | `/fauxplayers reload` | Reloads the configuration. |
 | `/fauxplayers refresh` | Starts a relay refresh. |
 | `/fauxplayers add <name>` | Adds a static entry. |
 | `/fauxplayers remove <name>` | Removes a static entry. |
 | `/fauxplayers ping <name> <ms>` | Sets a static ping. |
+| `/fauxplayers outlierping <count>` | Randomly selects that many active faux players for high pings; `0` disables it. |
+| `/fauxplayers outlierping set <min>-<max>` | Sets the bounded, normally distributed outlier ping range (default `300-1500`). |
+| `/fauxplayers pingrange set <min>-<max>` | Sets the random ping range for ordinary faux players. |
+| `/fauxplayers defaultping set <min>-<max>` | Sets the default latency range for static entries without an explicit latency. |
+| `/fauxplayers personas status` | Shows persona status, request count, and the latest result or error. |
+| `/fauxplayers set personas.mode JOINED` | Chat only while real players are online. Use `ALWAYS` to run from server startup. |
 | `/fauxplayers say <name> <message>` | Sends fake chat text. |
 | `/fauxplayers get <setting>` | Shows a setting. |
 | `/fauxplayers set <setting> <value>` | Changes a setting. |
